@@ -243,7 +243,8 @@ def generic_runner(net, optimizer, scheduler, criterion,
 
         if epoch_i % 5 == 0:
             net.eval()
-            test_res = run_epoch(net, optimizer, criterion, dl_test, 
+            with torch.no_grad():
+	        test_res = run_epoch(net, optimizer, criterion, dl_test, 
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
             for metric_name, metric_val in validate_func(test_res).items():
