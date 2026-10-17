@@ -51,7 +51,7 @@ LAMBDA_PENALTY = 1.0  # Вес L2-якоря для c_m
 
 EXP_NAME = f"good_{SPECT_SET}"
 
-net_params_base = {'init_noise' : 1e-2, 
+net_params_base = {'init_noise' : 1e-4, 
                    'resnet' : True, 
                    'int_d' : 2048, 
                    'layer_n' : 10, 
