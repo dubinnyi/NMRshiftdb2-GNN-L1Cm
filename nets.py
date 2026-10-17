@@ -751,12 +751,16 @@ class NormUncertainCalibrationLoss(nn.Module):
         self.lambda_penalty = lambda_penalty
 
     def forward(self, pred, y, mask):
-        mu, std = pred['mu'], pred['std']
+        mu  = pred['mu'].float() 
+	std = pred['std'].float()
+	y = y.float()
+	mask = mask.float()
+
         std = std + self.std_regularize
 
-        y_scaled = y / self.mu_scale
-        mu_scaled = mu / self.mu_scale
-        std_scaled = std / self.std_scale 
+        y_scaled = y / self.mu_scale.to(y.device).float()
+        mu_scaled = mu / self.mu_scale.to(mu.device).float()
+        std_scaled = std / self.std_scale.to(std.device).float()
 
         variance = std_scaled ** 2
         w = mask / variance
