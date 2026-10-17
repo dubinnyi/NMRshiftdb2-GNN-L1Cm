@@ -752,9 +752,9 @@ class NormUncertainCalibrationLoss(nn.Module):
 
     def forward(self, pred, y, mask):
         mu  = pred['mu'].float() 
-	std = pred['std'].float()
-	y = y.float()
-	mask = mask.float()
+        std = pred['std'].float()
+        y = y.float()
+        mask = mask.float()
 
         std = std + self.std_regularize
 
