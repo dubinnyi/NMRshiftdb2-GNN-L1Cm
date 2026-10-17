@@ -114,7 +114,8 @@ def create_checkpoint_func(every_n, filename_str):
 def run_epoch(net, optimizer, criterion, dl, 
                pred_only = False, USE_CUDA=True,
                return_pred = False, desc="train", 
-              print_shapes=False, progress_bar=True):
+              print_shapes=False, progress_bar=True,
+	      scaler=None):
     t1_total= time.time()
 
     accum_pred = []
@@ -144,36 +145,45 @@ def run_epoch(net, optimizer, criterion, dl,
         mask_t = move(mask, USE_CUDA)
         vals_t = move(vals, USE_CUDA)
 
-        res = net((adj_t, vect_feat_t)) 
+        # === ВКЛЮЧАЕМ AMP (FP16) ДЛЯ ФОРВАРДА И LOSS ===
+        with torch.cuda.amp.autocast(enabled=USE_CUDA):
+            res = net((adj_t, vect_feat_t))
 
-        if return_pred:
-            accum_pred_val = {}
-            if isinstance(res, dict):
-                for k, v in res.items():
-                    accum_pred_val[k] = res[k].cpu().detach().numpy()
+            if return_pred:
+                accum_pred_val = {}
+                if isinstance(res, dict):
+                    for k, v in res.items():
+                        accum_pred_val[k] = res[k].cpu().detach().numpy()
+                else:
+                    accum_pred_val['res'] = res.cpu().detach().numpy()
+                accum_pred_val['mask'] = mask.cpu().detach().numpy()
+                accum_pred_val['truth'] = vals.cpu().detach().numpy()
+
+                accum_pred.append(accum_pred_val)
+
+            if criterion is None:
+                loss = 0.0
+                nll = 0.0
+                penalty = 0.0
             else:
-                accum_pred_val['res'] = res.cpu().detach().numpy()
-            accum_pred_val['mask'] = mask.cpu().detach().numpy()
-            accum_pred_val['truth'] = vals.cpu().detach().numpy()
+                loss_out = criterion(res, vals_t, mask_t)
+                if isinstance(loss_out, tuple):
+                    loss, nll, penalty = loss_out
+                else:
+                    loss = loss_out
+                    nll = loss_out
+                    penalty = torch.tensor(0.0, device=loss.device)
+        # === КОНЕЦ БЛОКА AUTOCAST ===
 
-            accum_pred.append(accum_pred_val)
-
-        if criterion is None:
-            loss = 0.0
-            nll = 0.0
-            penalty = 0.0
-        else:
-            loss_out = criterion(res, vals_t, mask_t)
-            if isinstance(loss_out, tuple):
-                loss, nll, penalty = loss_out
-            else:
-                loss = loss_out
-                nll = loss_out
-                penalty = torch.tensor(0.0, device=loss.device)
-
+        # === ОБРАТНОЕ РАСПРОСТРАНЕНИЕ ЧЕРЕЗ SCALER ===
         if not pred_only:
-            loss.backward()
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
         obs_points = mask.sum()
         if criterion is not None:
@@ -211,6 +221,9 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    writer=None, validate_func = None, 
                    checkpoint_func = None):
 
+    # === ИНИЦИАЛИЗАЦИЯ GradScaler ===
+    scaler = torch.cuda.amp.GradScaler(enabled=USE_CUDA)
+
     for epoch_i in tqdm(range(MAX_EPOCHS)):
         if scheduler is not None:
             scheduler.step()
@@ -219,7 +232,8 @@ def generic_runner(net, optimizer, scheduler, criterion,
 
         net.train()
         train_res = run_epoch(net, optimizer, criterion, dl_train, 
-                               pred_only = False, USE_CUDA=USE_CUDA, desc='train')
+                               pred_only = False, USE_CUDA=USE_CUDA, desc='train',
+			       scaler=scaler)
 
         train_loss = train_res['running_loss'] / train_res['total_points']
         print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")

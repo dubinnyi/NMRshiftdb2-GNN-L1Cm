@@ -31,7 +31,7 @@ td = lambda x : os.path.join(DATASET_DIR, x)
 
 SPECT_SET = '13C' # or '1H'
 TENSORBOARD_DIR = f"logs.{SPECT_SET}"
-CHECKPOINT_DIR = "checkpoints"+"_"+SPECT_SET
+CHECKPOINT_DIR = "/tmp/checkpoints"+"_"+SPECT_SET
 MAT_PROPS= 'aromatic'
 DATASET_NAME = 'nmrshiftdb_hconfspcl_nmrshiftdb'
 
@@ -110,15 +110,15 @@ def train(infile, outfile, seed):
     # -----------------------------------------------------
     # Настройка Dataloader (фильтрация по мин. числу атомов)
     # -----------------------------------------------------
-    BATCH_SIZE = 16
+    BATCH_SIZE = 128
     dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
 
     ds_train, ds_test = graph_conv_many_nuc_util.make_datasets({'filename' : infile}, 
                                                                dataset_hparams, 
                                                                min_atoms=MIN_ATOMS)
                                                                
-    dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
-    dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+    dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=8)
+    dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=8)
 
     net_params = net_params_base.copy()
     opt_params = opt_params_base.copy()
@@ -160,7 +160,7 @@ def train(infile, outfile, seed):
     MODEL_NAME = "{}.{:08d}".format(EXP_NAME,int(time.time() % 1e8))
     checkpoint_filename = os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".{epoch_i:08d}")
     print("checkpoint:", checkpoint_filename)
-    checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(10, checkpoint_filename)
+    checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
                         
     writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, MODEL_NAME))
 
