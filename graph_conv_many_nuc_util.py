@@ -146,7 +146,7 @@ def run_epoch(net, optimizer, criterion, dl,
         vals_t = move(vals, USE_CUDA)
 
         # === ВКЛЮЧАЕМ AMP (FP16) ДЛЯ ФОРВАРДА И LOSS ===
-        with torch.cuda.amp.autocast(enabled=USE_CUDA):
+        with torch.amp.autocast('cuda', enabled=USE_CUDA):
             res = net((adj_t, vect_feat_t))
 
             if return_pred:
@@ -222,11 +222,9 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    checkpoint_func = None):
 
     # === ИНИЦИАЛИЗАЦИЯ GradScaler ===
-    scaler = torch.cuda.amp.GradScaler(enabled=USE_CUDA)
+    scaler = torch.amp.GradScaler('cuda', enabled=USE_CUDA)
 
     for epoch_i in tqdm(range(MAX_EPOCHS)):
-        if scheduler is not None:
-            scheduler.step()
 
         t1_total = time.time()
 
@@ -254,6 +252,8 @@ def generic_runner(net, optimizer, scheduler, criterion,
         if checkpoint_func is not None:
             checkpoint_func(epoch_i = epoch_i, net =net, optimizer=optimizer)
 
+        if scheduler is not None:
+            scheduler.step()
 
 def move(tensor, cuda=False):
     if cuda:

@@ -117,8 +117,8 @@ def train(infile, outfile, seed):
                                                                dataset_hparams, 
                                                                min_atoms=MIN_ATOMS)
                                                                
-    dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=8)
-    dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=8)
+    dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=32, presistent_workers=True)
+    dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=32, persistent_workers=True)
 
     net_params = net_params_base.copy()
     opt_params = opt_params_base.copy()
