@@ -115,7 +115,7 @@ def run_epoch(net, optimizer, criterion, dl,
                pred_only = False, USE_CUDA=True,
                return_pred = False, desc="train", 
               print_shapes=False, progress_bar=True,
-	      scaler=None):
+              scaler=None):
     t1_total= time.time()
 
     accum_pred = []
@@ -231,7 +231,7 @@ def generic_runner(net, optimizer, scheduler, criterion,
         net.train()
         train_res = run_epoch(net, optimizer, criterion, dl_train, 
                                pred_only = False, USE_CUDA=USE_CUDA, desc='train',
-			       scaler=scaler)
+                               scaler=scaler)
 
         train_loss = train_res['running_loss'] / train_res['total_points']
         print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")
@@ -244,7 +244,7 @@ def generic_runner(net, optimizer, scheduler, criterion,
         if epoch_i % 5 == 0:
             net.eval()
             with torch.no_grad():
-	        test_res = run_epoch(net, optimizer, criterion, dl_test, 
+                test_res = run_epoch(net, optimizer, criterion, dl_test, 
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
             for metric_name, metric_val in validate_func(test_res).items():
