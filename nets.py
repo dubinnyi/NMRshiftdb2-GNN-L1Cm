@@ -734,8 +734,11 @@ class NormUncertainLoss(nn.Module):
                               mu_scaled_masked, 
                               std_scaled_masked).mean()
 
-
 class NormUncertainCalibrationLoss(nn.Module):
+    """
+    Masked uncertainty loss with per-molecule calibration shift (c_m)
+    and L1 penalty to anchor the absolute scale.
+    """
     def __init__(self, 
                  mu_scale = torch.Tensor([1.0]), 
                  std_scale = torch.Tensor([1.0]), 
@@ -753,8 +756,7 @@ class NormUncertainCalibrationLoss(nn.Module):
         std = pred['std'].float()
         y = y.float()
         mask = mask.float()
-        # ====================================================
-
+        
         std = std + self.std_regularize
 
         mu_scale = self.mu_scale.to(y.device).float()
@@ -771,24 +773,22 @@ class NormUncertainCalibrationLoss(nn.Module):
         sum_w = w.sum(dim=1, keepdim=True)
         sum_w_clamped = torch.clamp(sum_w, min=1e-9)
         
+        # Weighted shift c_m (Градиенты включены)
         c_m = (delta * w).sum(dim=1, keepdim=True) / sum_w_clamped
-        # c_m = c_m.detach() 
-        
         c_m = c_m * (sum_w > 0).float()
         
         mu_calib = mu_scaled + c_m
         
+        # Element-wise NLL with calibrated mu
         element_wise = - (y_scaled - mu_calib)**2 / (2 * variance) - torch.log(std_scaled)
         
         log_pdf = element_wise * mask
         nll_loss = -log_pdf.sum() / torch.clamp(mask.sum(), min=1.0)
         
+        # L1 Penalty on absolute c_m for global anchor
         active_mols = (sum_w > 0).float()
         c_m_penalty = c_m.abs().sum() / torch.clamp(active_mols.sum(), min=1.0)
         
         total_loss = nll_loss + self.lambda_penalty * c_m_penalty
         
         return total_loss, nll_loss, c_m_penalty
-
-
-

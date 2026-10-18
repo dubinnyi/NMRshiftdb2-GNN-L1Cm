@@ -31,7 +31,7 @@ td = lambda x : os.path.join(DATASET_DIR, x)
 
 SPECT_SET = '13C' # or '1H'
 TENSORBOARD_DIR = f"logs.{SPECT_SET}"
-CHECKPOINT_DIR = "/tmp/checkpoints"+"_"+SPECT_SET
+CHECKPOINT_DIR = "checkpoints"+"_"+SPECT_SET
 MAT_PROPS= 'aromatic'
 DATASET_NAME = 'nmrshiftdb_hconfspcl_nmrshiftdb'
 
@@ -47,7 +47,7 @@ else:
 tgt_max_n = 64 
 MAX_EPOCHS = 10000
 MIN_ATOMS = 5
-LAMBDA_PENALTY = 1.0  # Вес L2-якоря для c_m
+LAMBDA_PENALTY = 1.0  # Вес L1-якоря для c_m
 
 EXP_NAME = f"good_{SPECT_SET}"
 
@@ -56,7 +56,7 @@ net_params_base = {'init_noise' : 1e-4,
                    'int_d' : 2048, 
                    'layer_n' : 10, 
                    'GS' : 4, 
-                   'agg_func' : 'goodmax', 
+                   'agg_func' : 'mean', 
                    'force_lin_init' : True, 
                    'g_feature_n' : -1, 
                    'resnet_out' : True, 
@@ -125,26 +125,42 @@ def train(infile, outfile, seed):
     net_params['g_feature_n'] = ds_test[0][1].shape[-1]
     net_params['OUT_DIM'] =  len(tgt_nucs)
 
-    use_std = True 
+    # === 1. ЧТЕНИЕ ПЕРЕМЕННЫХ РЕЖИМА ИЗ ОКРУЖЕНИЯ ===
+    PROTOCOL = os.environ.get("PROTOCOL", "warmup") # 'warmup' или 'molcalib'
+    LOAD_WEIGHTS = os.environ.get("LOAD_WEIGHTS", "") # Путь к файлу .state
+
     net = nets.GraphVertModel(**net_params)
+
+    # === 2. ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
+    if LOAD_WEIGHTS and os.path.exists(LOAD_WEIGHTS):
+        print(f"Loading pre-trained weights from {LOAD_WEIGHTS}...")
+        net.load_state_dict(torch.load(LOAD_WEIGHTS))
+    elif LOAD_WEIGHTS:
+        print(f"WARNING: Checkpoint {LOAD_WEIGHTS} not found!")
+
     net = move(net, USE_CUDA)
 
     loss_config = {'std_regularize' : STD_REGULARIZE, 
                    'mu_scale' : mu_scale, 
                    'std_scale' : std_scale}
 
-    if use_std:
-        std_regularize = loss_config['std_regularize']
-        mu_scale = move(torch.Tensor(loss_config['mu_scale']), USE_CUDA)
-        std_scale = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
+    mu_scale_t = move(torch.Tensor(loss_config['mu_scale']), USE_CUDA)
+    std_scale_t = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
         
-        # Инъекция новой функции с калибровкой
-        criterion = nets.NormUncertainCalibrationLoss(mu_scale, 
-                                                      std_scale,
+    # === 3. ВЫБОР ФУНКЦИИ ПОТЕРЬ И LEARNING RATE ===
+    if PROTOCOL == 'molcalib':
+        print("--- RUNNING IN MOLCALIB (FINE-TUNING) MODE ---")
+        opt_params['lr'] = 1e-5  # Снижаем LR для дообучения (Fine-Tuning)
+        criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, 
+                                                      std_scale_t,
                                                       std_regularize = loss_config['std_regularize'],
                                                       lambda_penalty = LAMBDA_PENALTY)
     else:
-        criterion = nets.MaskedMSELoss()
+        print("--- RUNNING IN WARMUP (STANDARD) MODE ---")
+        criterion = nets.NormUncertainLoss(mu_scale_t, 
+                                           std_scale_t,
+                                           std_regularize = loss_config['std_regularize'])
+
 
     validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
 
