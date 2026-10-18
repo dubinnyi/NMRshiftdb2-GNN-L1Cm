@@ -772,7 +772,7 @@ class NormUncertainCalibrationLoss(nn.Module):
         sum_w_clamped = torch.clamp(sum_w, min=1e-9)
         
         c_m = (delta * w).sum(dim=1, keepdim=True) / sum_w_clamped
-        c_m = c_m.detach() 
+        # c_m = c_m.detach() 
         
         c_m = c_m * (sum_w > 0).float()
         
