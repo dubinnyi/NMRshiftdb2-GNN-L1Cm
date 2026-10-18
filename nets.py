@@ -777,7 +777,9 @@ class NormUncertainCalibrationLoss(nn.Module):
         c_m = (delta * w).sum(dim=1, keepdim=True) / sum_w_clamped
         c_m = c_m * (sum_w > 0).float()
         
-        mu_calib = mu_scaled + c_m
+        # МАГИЯ ЗДЕСЬ: Для расчета NLL используем ОТВЯЗАННЫЙ c_m
+        # Сеть больше не сможет манипулировать сигмой, чтобы обнулить NLL 
+        mu_calib = mu_scaled + c_m.detach()
         
         # Element-wise NLL with calibrated mu
         element_wise = - (y_scaled - mu_calib)**2 / (2 * variance) - torch.log(std_scaled)

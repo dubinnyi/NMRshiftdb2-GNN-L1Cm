@@ -38,11 +38,11 @@ DATASET_NAME = 'nmrshiftdb_hconfspcl_nmrshiftdb'
 if SPECT_SET == '13C':
     NUC_LOSS_SCALE = {'13C' : 1.0} 
     NUC_STD_SCALE = {'13C' : 1.0} 
-    STD_REGULARIZE = 0.1
+    STD_REGULARIZE = 0.8
 else:
     NUC_LOSS_SCALE = {'1H' : 1.0/20.0}
     NUC_STD_SCALE = {'1H' : 10.0} 
-    STD_REGULARIZE = 0.01
+    STD_REGULARIZE = 0.08
 
 tgt_max_n = 64 
 MAX_EPOCHS = 10000
