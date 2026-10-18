@@ -784,7 +784,7 @@ class NormUncertainCalibrationLoss(nn.Module):
         nll_loss = -log_pdf.sum() / torch.clamp(mask.sum(), min=1.0)
         
         active_mols = (sum_w > 0).float()
-        c_m_penalty = (c_m**2).sum() / torch.clamp(active_mols.sum(), min=1.0)
+        c_m_penalty = c_m.abs().sum() / torch.clamp(active_mols.sum(), min=1.0)
         
         total_loss = nll_loss + self.lambda_penalty * c_m_penalty
         
