@@ -13,8 +13,12 @@ from graph_conv_many_nuc_util import PredModel
 INFILE = "graph_conv_many_nuc_pipeline.datasets/graph_conv_many_nuc_pipeline.data.13C.nmrshiftdb_hconfspcl_nmrshiftdb.aromatic.64.0.mol_dict.pickle"
 
 # Укажите актуальные пути (на скриншоте у вас был запуск 92183870)
-META_FILE = "checkpoints_13C/good_13C.92183870.meta"
-MODEL_FILE = "checkpoints_13C/good_13C.92183870.00000220.model"  # Замените 00000210 на номер вашей эпохи
+
+#META_FILE = "checkpoints_13C/good_13C.92183870.meta"
+#MODEL_FILE = "checkpoints_13C/good_13C.92183870.00000220.model"  # Замените 00000210 на номер вашей эпохи
+
+META_FILE="checkpoints_13C/good_13C.92273990.meta"
+MODEL_FILE="checkpoints_13C/good_13C.92273990.00000100.model"
 
 USE_CUDA = True
 BATCH_SIZE = 16
@@ -100,7 +104,7 @@ def main():
     analyze_and_plot(z_test, "Test", axes[:, 1])   # Правая колонка - Test
     
     plt.tight_layout()
-    plt.savefig("z_distribution_analysis.png", dpi=300)
+    plt.savefig("z_distribution_analysis_molcalib.png", dpi=300)
     print("Готово! Графики сохранены в файл 'z_distribution_analysis.png'")
     plt.show()
 
