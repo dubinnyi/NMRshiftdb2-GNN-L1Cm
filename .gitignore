@@ -1,0 +1,10 @@
+-e __pycache__/
+*.pyc
+*~
+.ruffus_history.sqlite
+checkpoints_13C/
+logs.13C/
+*.pickle
+*.out
+*.json
+*.meta
