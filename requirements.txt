@@ -1,0 +1,13 @@
+CIRpy
+matplotlib
+numba
+numpy<2
+pandas<2
+PubChemPy
+rdkit
+ruffus
+scikit-learn
+scipy
+tensorboardX
+torch
+tqdm

@@ -1,0 +1,23 @@
+# usage:
+# conda env create -f environment.yml 
+#
+name: nmrshift
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy<2
+  - pandas<2
+  - scipy
+  - cirpy
+  - matplotlib
+  - numba
+  - pubchempy
+  - rdkit
+  - ruffus
+  - scikit-learn
+  - tensorboardX
+  - pytorch
+  - tqdm
