@@ -3,11 +3,15 @@
 #
 name: nmrshift
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
   - bioconda
   - defaults
 dependencies:
   - python=3.10
+  - pytorch
+  - pytorch-cuda
   - numpy<2
   - pandas<2
   - scipy
@@ -19,5 +23,6 @@ dependencies:
   - ruffus
   - scikit-learn
   - tensorboardX
-  - pytorch
   - tqdm
+  - ipython
+  - tensorboard

@@ -224,6 +224,11 @@ def generic_runner(net, optimizer, scheduler, criterion,
     # === ИНИЦИАЛИЗАЦИЯ GradScaler ===
     scaler = torch.amp.GradScaler('cuda', enabled=USE_CUDA)
 
+    # === ИНИЦИАЛИЗАЦИЯ РАННЕЙ ОСТАНОВКИ ===
+    # patience=20 означает 20 проверок подряд (т.е. 100 эпох, так как проверка каждые 5 эпох)
+    early_stopping = EarlyStopping(patience=20, min_delta=1e-4)
+
+
     for epoch_i in tqdm(range(MAX_EPOCHS)):
 
         t1_total = time.time()
@@ -247,6 +252,11 @@ def generic_runner(net, optimizer, scheduler, criterion,
                 test_res = run_epoch(net, optimizer, criterion, dl_test, 
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
+
+            # --- ЛОГИКА РАННЕЙ ОСТАНОВКИ ---
+            test_loss = test_res['running_loss'] / test_res['total_points']
+            early_stopping(test_loss)
+	
             for metric_name, metric_val in validate_func(test_res).items():
                 writer.add_scalar(metric_name, metric_val, epoch_i)
             
@@ -255,6 +265,12 @@ def generic_runner(net, optimizer, scheduler, criterion,
 
         if scheduler is not None:
             scheduler.step()
+
+	# Проверка флага ранней остановки в конце эпохи
+        if early_stopping.early_stop:
+            print(f"\n--- ОБУЧЕНИЕ ОСТАНОВЛЕНО ДОСРОЧНО на эпохе {epoch_i} ---")
+            print(f"Валидационный Loss не улучшался последние {early_stopping.patience * 5} эпох.")
+            break
 
 def move(tensor, cuda=False):
     if cuda:
@@ -393,3 +409,28 @@ def create_uncertain_validate_func(tgt_nucs):
 
         return val_res
     return val_func
+
+
+class EarlyStopping:
+    """
+    Ранняя остановка обучения, если валидационный loss не улучшается.
+    """
+    def __init__(self, patience=20, min_delta=1e-4):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            print(f"  [EarlyStop] Нет улучшений. Счетчик: {self.counter}/{self.patience}. Лучший Loss: {self.best_loss:.4f}")
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            print(f"  [EarlyStop] Улучшение! Loss снизился с {self.best_loss:.4f} до {val_loss:.4f}")
+            self.best_loss = val_loss
+            self.counter = 0

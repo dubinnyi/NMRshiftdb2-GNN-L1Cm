@@ -17,8 +17,13 @@ INFILE = "graph_conv_many_nuc_pipeline.datasets/graph_conv_many_nuc_pipeline.dat
 #META_FILE = "checkpoints_13C/good_13C.92183870.meta"
 #MODEL_FILE = "checkpoints_13C/good_13C.92183870.00000220.model"  # Замените 00000210 на номер вашей эпохи
 
-META_FILE="checkpoints_13C/good_13C.92273990.meta"
-MODEL_FILE="checkpoints_13C/good_13C.92273990.00000100.model"
+#META_FILE="checkpoints_13C/good_13C.92273990.meta"
+#MODEL_FILE="checkpoints_13C/good_13C.92273990.00000100.model"
+
+
+META_FILE="checkpoints_13C/good_13C.92362652.meta"
+MODEL_FILE="checkpoints_13C/good_13C.92362652.00000050.model"
+
 
 USE_CUDA = True
 BATCH_SIZE = 16
@@ -94,7 +99,7 @@ def main():
 
     def compute_calibrated_z(res_df, std_reg=0.1):
         """ Считает правильный Z-score с учетом c_m и регуляризатора дисперсии """
-        # 1. Прибавляем регуляризатор (0.1 для 13C), чтобы избежать деления на 0
+        # 1. Прибавляем регуляризатор (0.8 для 13C), чтобы избежать деления на 0
         true_std = res_df['pred_std'] + std_reg
         
         # 2. Считаем c_m так же, как внутри NormUncertainCalibrationLoss
@@ -131,7 +136,7 @@ def main():
     analyze_and_plot(z_test, "Test", axes[:, 1])   # Правая колонка - Test
     
     plt.tight_layout()
-    plt.savefig("z_distribution_analysis_molcalib.png", dpi=300)
+    plt.savefig("z_distribution_analysis_molcalib-2.png", dpi=300)
     print("Готово! Графики сохранены в файл 'z_distribution_analysis.png'")
     plt.show()
 
