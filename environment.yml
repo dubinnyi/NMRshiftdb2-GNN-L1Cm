@@ -27,3 +27,4 @@ dependencies:
   - ipython
   - tensorboard
   - setuptools<70.0.0 # for tensorboard, not resolved by conda
+  - gdown
