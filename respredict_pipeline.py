@@ -233,4 +233,12 @@ def train(infile, outfile, seed):
                 open(outfile, 'wb'))
 
 if __name__ == "__main__":
-    pipeline_run([train], forced_tasks=[train])
+    import glob
+    # Принудительно удаляем старые маркеры выполнения Ruffus перед запуском
+    for old_out_file in glob.glob(f"respredict_pipeline_{SPECT_SET}.*.out"):
+        try:
+            os.remove(old_out_file)
+        except OSError:
+            pass
+            
+    pipeline_run([train]) 
