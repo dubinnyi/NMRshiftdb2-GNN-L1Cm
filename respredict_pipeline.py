@@ -39,6 +39,8 @@ parser.add_argument("--min_error", type=float, default=None,
                     help="Минимальная ошибка (std_regularize) в ppm. По умолчанию: 13C=0.8, 1H=0.08")
 parser.add_argument("--max_epochs", type=int, default=10000, 
                     help="Максимальное количество эпох на один этап")
+parser.add_argument("--cv_i", type=int, default=0, 
+                    help="Индекс кросс-валидации датасета (0, 1 и т.д.)")
 args, unknown = parser.parse_known_args()
 
 SPECT_SET = args.nucleus
@@ -96,7 +98,7 @@ opt_params_base = {'amsgrad' : False,
                    'scheduler_step_size' : 10}
 
 def params():
-    CV_I = int(os.environ.get("CV_I", 0))
+    CV_I = args.cv_i
     infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{:d}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
                                                                                               MAT_PROPS, tgt_max_n, CV_I))
     seed = 1234                                                                                              
