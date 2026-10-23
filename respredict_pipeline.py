@@ -6,6 +6,7 @@ import os
 from glob import glob
 import json 
 import time
+import argparse
 
 from ruffus import * 
 from tqdm import  tqdm
@@ -26,10 +27,34 @@ import itertools
 import graph_conv_many_nuc_util
 from graph_conv_many_nuc_util import move
 
+# === 1. ПАРСИНГ АРГУМЕНТОВ КОМАНДНОЙ СТРОКИ ===
+parser = argparse.ArgumentParser(description="NMR GNN Training Pipeline")
+parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib", "auto"], default="auto", 
+                    help="Режим обучения: warmup, molcalib, или auto (warmup -> molcalib)")
+parser.add_argument("--weights", type=str, default="", 
+                    help="Путь к файлу предобученных весов (.state)")
+parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
+                    help="Целевое ядро для предсказаний")
+parser.add_argument("--min_error", type=float, default=None, 
+                    help="Минимальная ошибка (std_regularize) в ppm. По умолчанию: 13C=0.8, 1H=0.08")
+parser.add_argument("--max_epochs", type=int, default=10000, 
+                    help="Максимальное количество эпох на один этап")
+args, unknown = parser.parse_known_args()
+
+SPECT_SET = args.nucleus
+PROTOCOL = args.protocol
+LOAD_WEIGHTS = args.weights
+MAX_EPOCHS = args.max_epochs
+
+# Настройка регулярзиатора (минимальной ошибки)
+if args.min_error is not None:
+    STD_REGULARIZE = args.min_error
+else:
+    STD_REGULARIZE = 0.8 if SPECT_SET == '13C' else 0.08
+
 DATASET_DIR = "graph_conv_many_nuc_pipeline.datasets"
 td = lambda x : os.path.join(DATASET_DIR, x)
 
-SPECT_SET = '13C' # or '1H'
 TENSORBOARD_DIR = f"logs.{SPECT_SET}"
 CHECKPOINT_DIR = "checkpoints"+"_"+SPECT_SET
 MAT_PROPS= 'aromatic'
@@ -38,14 +63,11 @@ DATASET_NAME = 'nmrshiftdb_hconfspcl_nmrshiftdb'
 if SPECT_SET == '13C':
     NUC_LOSS_SCALE = {'13C' : 1.0} 
     NUC_STD_SCALE = {'13C' : 1.0} 
-    STD_REGULARIZE = 0.8
 else:
     NUC_LOSS_SCALE = {'1H' : 1.0/20.0}
     NUC_STD_SCALE = {'1H' : 10.0} 
-    STD_REGULARIZE = 0.08
 
 tgt_max_n = 64 
-MAX_EPOCHS = 10000
 MIN_ATOMS = 5
 LAMBDA_PENALTY = 1.0  # Вес L1-якоря для c_m
 
@@ -121,13 +143,8 @@ def train(infile, outfile, seed):
     dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
 
     net_params = net_params_base.copy()
-    opt_params = opt_params_base.copy()
     net_params['g_feature_n'] = ds_test[0][1].shape[-1]
     net_params['OUT_DIM'] =  len(tgt_nucs)
-
-    # === 1. ЧТЕНИЕ ПЕРЕМЕННЫХ РЕЖИМА ИЗ ОКРУЖЕНИЯ ===
-    PROTOCOL = os.environ.get("PROTOCOL", "warmup") # 'warmup' или 'molcalib'
-    LOAD_WEIGHTS = os.environ.get("LOAD_WEIGHTS", "") # Путь к файлу .state
 
     net = nets.GraphVertModel(**net_params)
 
@@ -146,57 +163,69 @@ def train(infile, outfile, seed):
 
     mu_scale_t = move(torch.Tensor(loss_config['mu_scale']), USE_CUDA)
     std_scale_t = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
-        
-    # === 3. ВЫБОР ФУНКЦИИ ПОТЕРЬ И LEARNING RATE ===
-    if PROTOCOL == 'molcalib':
-        print("--- RUNNING IN MOLCALIB (FINE-TUNING) MODE ---")
-        opt_params['lr'] = 1e-5  # Снижаем LR для дообучения (Fine-Tuning)
-        criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, 
-                                                      std_scale_t,
-                                                      std_regularize = loss_config['std_regularize'],
-                                                      lambda_penalty = LAMBDA_PENALTY)
-    else:
-        print("--- RUNNING IN WARMUP (STANDARD) MODE ---")
-        criterion = nets.NormUncertainLoss(mu_scale_t, 
-                                           std_scale_t,
-                                           std_regularize = loss_config['std_regularize'])
-
-
-    validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
-
-    optimizer = torch.optim.Adam(net.parameters(), lr=opt_params['lr'], 
-                                 amsgrad=opt_params['amsgrad'], 
-                                 eps=opt_params['eps'], 
-                                 weight_decay=opt_params['weight_decay'])
     
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 
-                                                step_size=opt_params['scheduler_step_size'], 
-                                                gamma=opt_params['scheduler_gamma'])
+    # Определяем, какие этапы запускать
+    protocols_to_run = ["warmup", "molcalib"] if PROTOCOL == "auto" else [PROTOCOL]
 
-    MODEL_NAME = "{}.{:08d}".format(EXP_NAME,int(time.time() % 1e8))
-    checkpoint_filename = os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".{epoch_i:08d}")
-    print("checkpoint:", checkpoint_filename)
-    checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
-                        
-    writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, MODEL_NAME))
+    # === 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК ЭТАПОВ ===
+    for stage_protocol in protocols_to_run:
+        opt_params = opt_params_base.copy()
+        
+        print("\n" + "="*60)
+        if stage_protocol == 'molcalib':
+            print("=== RUNNING STAGE: MOLCALIB (FINE-TUNING) ===")
+            opt_params['lr'] = 1e-5  # Снижаем LR для дообучения
+            criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, 
+                                                          std_scale_t,
+                                                          std_regularize = loss_config['std_regularize'],
+                                                          lambda_penalty = LAMBDA_PENALTY)
+        else:
+            print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
+            opt_params['lr'] = 1e-4
+            criterion = nets.NormUncertainLoss(mu_scale_t, 
+                                               std_scale_t,
+                                               std_regularize = loss_config['std_regularize'])
+        print("="*60 + "\n")
 
-    metadata = {'dataset_hparams' : dataset_hparams, 
-                'net_params' : net_params, 
-                'opt_params' : opt_params, 
-                'infile' : infile, 
-                'tgt_nucs' : tgt_nucs, 
-                'max_n' : MAX_N,
-                'loss_params' : loss_config}
+        validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
 
-    json.dump(metadata, open(os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".json"), 'w'), indent=4)
-    pickle.dump(metadata, open(os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".meta"), 'wb'))
+        optimizer = torch.optim.Adam(net.parameters(), lr=opt_params['lr'], 
+                                     amsgrad=opt_params['amsgrad'], 
+                                     eps=opt_params['eps'], 
+                                     weight_decay=opt_params['weight_decay'])
+        
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 
+                                                    step_size=opt_params['scheduler_step_size'], 
+                                                    gamma=opt_params['scheduler_gamma'])
 
-    graph_conv_many_nuc_util.generic_runner(net, optimizer, scheduler, criterion, 
-                                            dl_train, dl_test, 
-                                            MAX_EPOCHS=MAX_EPOCHS, 
-                                            USE_CUDA=USE_CUDA, writer=writer, 
-                                            validate_func= validate_func, 
-                                            checkpoint_func= checkpoint_func)
+        STAGE_MODEL_NAME = "{}_{}.{:08d}".format(EXP_NAME, stage_protocol, int(time.time() % 1e8))
+        checkpoint_filename = os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".{epoch_i:08d}")
+        print("Checkpoint template:", checkpoint_filename)
+        checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
+                            
+        writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
+
+        metadata = {'dataset_hparams' : dataset_hparams, 
+                    'net_params' : net_params, 
+                    'opt_params' : opt_params, 
+                    'infile' : infile, 
+                    'tgt_nucs' : tgt_nucs, 
+                    'max_n' : MAX_N,
+                    'loss_params' : loss_config,
+                    'stage': stage_protocol}
+
+        json.dump(metadata, open(os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".json"), 'w'), indent=4)
+        pickle.dump(metadata, open(os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".meta"), 'wb'))
+
+        # Запуск обучения для текущего этапа (встроенная функция EarlyStopping прервет цикл при необходимости)
+        graph_conv_many_nuc_util.generic_runner(net, optimizer, scheduler, criterion, 
+                                                dl_train, dl_test, 
+                                                MAX_EPOCHS=MAX_EPOCHS, 
+                                                USE_CUDA=USE_CUDA, writer=writer, 
+                                                validate_func= validate_func, 
+                                                checkpoint_func= checkpoint_func)
+                                                
+        # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
 
     pickle.dump({'net_params' : net_params, 
                  'opt_params' : opt_params, 
@@ -204,4 +233,4 @@ def train(infile, outfile, seed):
                 open(outfile, 'wb'))
 
 if __name__ == "__main__":
-    pipeline_run([train])
+    pipeline_run([train], forced_tasks=[train])
