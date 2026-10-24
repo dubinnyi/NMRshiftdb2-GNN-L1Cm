@@ -52,7 +52,7 @@ MAX_EPOCHS = args.max_epochs
 if args.min_error is not None:
     STD_REGULARIZE = args.min_error
 else:
-    STD_REGULARIZE = 0.8 if SPECT_SET == '13C' else 0.08
+    STD_REGULARIZE = 0.8 if SPECT_SET == '13C' else 0.03
 
 DATASET_DIR = "graph_conv_many_nuc_pipeline.datasets"
 td = lambda x : os.path.join(DATASET_DIR, x)
@@ -228,6 +228,17 @@ def train(infile, outfile, seed):
                                                 checkpoint_func= checkpoint_func)
                                                 
         # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
+        best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
+
+        # Если ранее была применена обертка DataParallel для нескольких GPU,
+        # нужно сохранять внутренний модуль (net.module), а не саму обертку.
+        if isinstance(net, torch.nn.DataParallel):
+            torch.save(net.module.state_dict(), best_model_path)
+        else:
+            torch.save(net.state_dict(), best_model_path)
+
+        print(f"Финальные веса этапа {stage_protocol} сохранены в: {best_model_path}")
+        # --------------------------
 
     pickle.dump({'net_params' : net_params, 
                  'opt_params' : opt_params, 
