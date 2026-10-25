@@ -12,8 +12,8 @@ from graph_conv_many_nuc_util import PredModel
 
 # === ПАРСИНГ АРГУМЕНТОВ ===
 parser = argparse.ArgumentParser(description="Построение Z-score распределения для графовой модели ЯМР")
-parser.add_argument("--state", type=str, required=True, 
-                    help="Путь к файлу модели (.model или .state)")
+parser.add_argument("--model", type=str, required=True, 
+                    help="Путь к файлу модели (.model)")
 parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
                     help="Целевое ядро (по умолчанию 13C)")
 parser.add_argument("--cv_i", type=int, default=0, 
@@ -23,9 +23,9 @@ parser.add_argument("--min_error", type=float, default=None,
 parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default="warmup", 
                     help="Режим модели: warmup (без c_m) или molcalib (с c_m)")
 parser.add_argument("--out", type=str, default="", 
-                    help="Явный путь к выходному графику (по умолчанию - как имя state файла с .png)")
+                    help="Явный путь к выходному графику (по умолчанию - как имя model файла с .png)")
 parser.add_argument("--meta", type=str, default="", 
-                    help="Явный путь к .meta файлу (по умолчанию выводится из имени state файла)")
+                    help="Явный путь к .meta файлу (по умолчанию выводится из имени model файла)")
 
 args, unknown = parser.parse_known_args()
 
@@ -38,9 +38,9 @@ MAT_PROPS = "aromatic"
 TGT_MAX_N = 64
 
 INFILE = os.path.join(DATASET_DIR, f"graph_conv_many_nuc_pipeline.data.{SPECT_SET}.{DATASET_NAME}.{MAT_PROPS}.{TGT_MAX_N}.{CV_I}.mol_dict.pickle")
-MODEL_FILE = args.state
+MODEL_FILE = args.model
 
-# Автоматическое определение META_FILE (отрезаем ".00000300.state" и добавляем ".meta")
+# Автоматическое определение META_FILE (отрезаем ".00000300.model" и добавляем ".meta")
 if args.meta:
     META_FILE = args.meta
 else:
