@@ -103,7 +103,8 @@ def params():
     CV_I = args.cv_i
     infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{:d}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
                                                                                               MAT_PROPS, tgt_max_n, CV_I))
-    seed = 1234                                                                                              
+#    seed = 1234                                                                                              
+    seed = 4321
     outfile = f"respredict_pipeline_{SPECT_SET}.{seed}.{CV_I}.out"
     yield infile, outfile, seed
 
