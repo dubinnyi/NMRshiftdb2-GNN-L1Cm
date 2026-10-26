@@ -6,14 +6,16 @@ import matplotlib.pyplot as plt
 import scipy.stats as stats
 import torch
 import argparse
+import json
 
 # Импортируем классы из скриптов проекта
 from graph_conv_many_nuc_util import PredModel
+import nets
 
 # === ПАРСИНГ АРГУМЕНТОВ ===
 parser = argparse.ArgumentParser(description="Построение Z-score распределения для графовой модели ЯМР")
-parser.add_argument("--model", type=str, required=True, 
-                    help="Путь к файлу модели (.model)")
+parser.add_argument("--state", type=str, required=True, 
+                    help="Путь к файлу модели (.model или .state)")
 parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
                     help="Целевое ядро (по умолчанию 13C)")
 parser.add_argument("--cv_i", type=int, default=0, 
@@ -23,9 +25,9 @@ parser.add_argument("--min_error", type=float, default=None,
 parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default="warmup", 
                     help="Режим модели: warmup (без c_m) или molcalib (с c_m)")
 parser.add_argument("--out", type=str, default="", 
-                    help="Явный путь к выходному графику (по умолчанию - как имя model файла с .png)")
+                    help="Явный путь к выходному графику (по умолчанию - как имя модели с .png)")
 parser.add_argument("--meta", type=str, default="", 
-                    help="Явный путь к .meta файлу (по умолчанию выводится из имени model файла)")
+                    help="Явный путь к .meta файлу (по умолчанию выводится из имени модели)")
 
 args, unknown = parser.parse_known_args()
 
@@ -38,17 +40,39 @@ MAT_PROPS = "aromatic"
 TGT_MAX_N = 64
 
 INFILE = os.path.join(DATASET_DIR, f"graph_conv_many_nuc_pipeline.data.{SPECT_SET}.{DATASET_NAME}.{MAT_PROPS}.{TGT_MAX_N}.{CV_I}.mol_dict.pickle")
-MODEL_FILE = args.model
+INPUT_PATH = args.state
 
-# Автоматическое определение META_FILE (отрезаем ".00000300.model" и добавляем ".meta")
+# Автоматическое определение META_FILE
 if args.meta:
     META_FILE = args.meta
 else:
-    parts = MODEL_FILE.split('.')
-    if len(parts) >= 3:
-        META_FILE = ".".join(parts[:-2]) + ".meta"
+    # Убираем расширения вроде .best.state, .state или .model перед поиском .meta
+    base_name = INPUT_PATH
+    for ext in ['.best.state', '.state', '.model', '.best.model']:
+        if base_name.endswith(ext):
+            base_name = base_name[:-len(ext)]
+            break
     else:
-        META_FILE = os.path.splitext(MODEL_FILE)[0] + ".meta"
+        base_name = os.path.splitext(INPUT_PATH)[0]
+    META_FILE = base_name + ".meta"
+
+# Если передан .state файл, проверяем наличие эквивалентного .model файла. Если его нет — создаем автоматически.
+if INPUT_PATH.endswith(".state"):
+    MODEL_FILE = INPUT_PATH.replace(".state", ".model")
+    if not os.path.exists(MODEL_FILE):
+        print(f"Обнаружен .state файл, но файл {MODEL_FILE} отсутствует.")
+        print("Автоматическая сборка и сохранение недостающего .model файла...")
+        try:
+            meta_data = json.load(open(META_FILE, 'r'))
+            net_params = meta_data['net_params']
+            temp_net = nets.GraphVertModel(**net_params)
+            temp_net.load_state_dict(torch.load(INPUT_PATH, map_location='cpu'))
+            torch.save(temp_net, MODEL_FILE)
+            print(f"Успешно создан файл модели: {MODEL_FILE}")
+        except Exception as e:
+            raise RuntimeError(f"Не удалось автоматически создать .model файл: {e}")
+else:
+    MODEL_FILE = INPUT_PATH
 
 # Автоматическое определение OUT_FILE
 if args.out:
@@ -110,7 +134,8 @@ def analyze_and_plot(z_values, title_prefix, axes):
 def main():
     print(f"--- НАСТРОЙКИ ЗАПУСКА ---")
     print(f"Ядро:\t\t{SPECT_SET} (cv_i: {CV_I})")
-    print(f"Модель:\t\t{MODEL_FILE}")
+    print(f"Входной файл:\t{INPUT_PATH}")
+    print(f"Модель для загрузки: {MODEL_FILE}")
     print(f"Meta файл:\t{META_FILE}")
     print(f"Мин. ошибка:\t{STD_REGULARIZE} ppm")
     print(f"Сдвиг c_m:\t{'ВКЛЮЧЕН (molcalib)' if APPLY_CM else 'ОТКЛЮЧЕН (warmup)'}")
