@@ -256,7 +256,7 @@ def generic_runner(net, optimizer, scheduler, criterion,
             # --- ЛОГИКА РАННЕЙ ОСТАНОВКИ ---
             test_loss = test_res['running_loss'] / test_res['total_points']
             early_stopping(test_loss)
-	
+        
             for metric_name, metric_val in validate_func(test_res).items():
                 writer.add_scalar(metric_name, metric_val, epoch_i)
             
@@ -266,7 +266,7 @@ def generic_runner(net, optimizer, scheduler, criterion,
         if scheduler is not None:
             scheduler.step()
 
-	# Проверка флага ранней остановки в конце эпохи
+        # Проверка флага ранней остановки в конце эпохи
         if early_stopping.early_stop:
             print(f"\n--- ОБУЧЕНИЕ ОСТАНОВЛЕНО ДОСРОЧНО на эпохе {epoch_i} ---")
             print(f"Валидационный Loss не улучшался последние {early_stopping.patience * 5} эпох.")
@@ -290,6 +290,8 @@ class PredModel(object):
 
         if self. USE_CUDA:
             net = torch.load(checkpoint_filename, weights_only=False)
+            if isinstance(net, torch.nn.Module):
+                net = net.cuda()
         else:
             net = torch.load(checkpoint_filename, 
                              map_location=lambda storage, loc: storage,

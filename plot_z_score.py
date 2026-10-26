@@ -63,10 +63,12 @@ if INPUT_PATH.endswith(".state"):
         print(f"Обнаружен .state файл, но файл {MODEL_FILE} отсутствует.")
         print("Автоматическая сборка и сохранение недостающего .model файла...")
         try:
-            meta_data = json.load(open(META_FILE, 'r'))
+            with open(META_FILE, 'rb') as f:
+                meta_data = pickle.load(f)
             net_params = meta_data['net_params']
             temp_net = nets.GraphVertModel(**net_params)
             temp_net.load_state_dict(torch.load(INPUT_PATH, map_location='cpu'))
+            temp_net = temp_net.cuda()
             torch.save(temp_net, MODEL_FILE)
             print(f"Успешно создан файл модели: {MODEL_FILE}")
         except Exception as e:
