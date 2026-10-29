@@ -156,7 +156,7 @@ def train(infile, outfile, seed):
     # === 2. ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
     if LOAD_WEIGHTS and os.path.exists(LOAD_WEIGHTS):
         print(f"Loading pre-trained weights from {LOAD_WEIGHTS}...")
-        net.load_state_dict(torch.load(LOAD_WEIGHTS))
+        net.load_state_dict(torch.load(LOAD_WEIGHTS, weights_only=True))
     elif LOAD_WEIGHTS:
         print(f"WARNING: Checkpoint {LOAD_WEIGHTS} not found!")
 
@@ -232,15 +232,17 @@ def train(infile, outfile, seed):
                                                 
         # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
         best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
+        best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.model")
 
         # Если ранее была применена обертка DataParallel для нескольких GPU,
         # нужно сохранять внутренний модуль (net.module), а не саму обертку.
         if isinstance(net, torch.nn.DataParallel):
             torch.save(net.module.state_dict(), best_model_path)
+            torch.save(net.module, best_model_path)
         else:
             torch.save(net.state_dict(), best_model_path)
-
-        print(f"Финальные веса этапа {stage_protocol} сохранены в: {best_model_path}")
+            torch.save(net, best_model_path)
+        print(f"Финальные веса этапа {stage_protocol} сохранены :\n  {best_state_path}\n  {best_model_path}")
         # --------------------------
 
     pickle.dump({'net_params' : net_params, 
