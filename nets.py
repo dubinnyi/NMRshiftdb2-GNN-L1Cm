@@ -715,7 +715,13 @@ class NormUncertainLoss(nn.Module):
         self.std_scale = std_scale
 
     def __call__(self, pred, y,  mask):
-        mu, std = pred['mu'], pred['std']
+        # === ДОБАВЛЕНО: ПРИНУДИТЕЛЬНЫЙ ПЕРЕХОД В FP32 ===
+        mu = pred['mu'].float() 
+        std = pred['std'].float()
+        y = y.float()
+        mask = mask.float()
+        # ================================================
+
         if self.use_log1p:
             log = torch.log1p
         else:
