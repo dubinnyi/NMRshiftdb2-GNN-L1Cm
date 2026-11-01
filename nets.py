@@ -700,6 +700,30 @@ class MaskedMSEScaledLoss(nn.Module):
         return self.mseloss(x_masked, y_masked)
 
 
+class MaskedMSELossForPretrain(nn.Module):
+    """
+    Протокол предварительного обучения: минимизирует MSE для агрессивного и быстрого сдвига mu.
+    """
+    def __init__(self, mu_scale):
+        super().__init__()
+        self.mu_scale = mu_scale
+
+    def __call__(self, pred, y, mask):
+        mu = pred['mu'].float()
+        y = y.float()
+        mask = mask.float()
+
+        mu_scale = self.mu_scale.to(y.device).float()
+
+        y_scaled = y / mu_scale
+        mu_scaled = mu / mu_scale
+
+        # MSE вместо L1 дает экспоненциально более сильный градиент на старте
+        sq_diff = (y_scaled[mask > 0] - mu_scaled[mask > 0])**2
+        
+        return sq_diff.mean()
+
+
 class MaskedL1Loss(nn.Module):
     """
     Протокол предварительного обучения: минимизирует только ошибку предсказания (MAE), 

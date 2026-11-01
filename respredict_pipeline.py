@@ -195,11 +195,13 @@ def train(infile, outfile, seed):
             criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
                                                           std_regularize=loss_config['std_regularize'],
                                                           lambda_penalty=LAMBDA_PENALTY)
+
         elif stage_protocol == 'pretrain':
-            print("=== RUNNING STAGE: PRETRAIN (L1 LOSS ONLY) ===")
-            opt_params['lr'] = 1e-4  # Хороший шаг для быстрого сдвига mu
-            criterion = nets.MaskedL1Loss(mu_scale_t)
-            stage_max_epochs = 300 
+            print("=== RUNNING STAGE: PRETRAIN (MSE LOSS ONLY) ===")
+            opt_params['lr'] = 1e-3  # <-- Увеличено в 10 раз
+            criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
+            stage_max_epochs = 300
+
         else: # warmup
             print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
             opt_params['lr'] = 1e-4
