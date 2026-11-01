@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 import scipy.stats as stats
 import torch
 import argparse
+import json
 
-# Импортируем классы из скриптов проекта
 from graph_conv_many_nuc_util import PredModel
 import nets
 
@@ -15,33 +15,23 @@ import nets
 parser = argparse.ArgumentParser(description="Построение Z-score распределения для графовой модели ЯМР")
 parser.add_argument("--state", type=str, required=True, 
                     help="Путь к файлу модели (.model или .state)")
-parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
-                    help="Целевое ядро (по умолчанию 13C)")
-parser.add_argument("--cv_i", type=int, default=0, 
-                    help="Индекс кросс-валидации датасета (по умолчанию 0)")
+parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default=None, 
+                    help="Целевое ядро (автовывод из meta, если не указано)")
+parser.add_argument("--cv_i", type=int, default=None, 
+                    help="Индекс кросс-валидации (автовывод из meta, если не указано)")
 parser.add_argument("--min_error", type=float, default=None, 
-                    help="Минимальная ошибка (std_reg). По умолчанию: 13C=0.8, 1H=0.08")
-parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default="warmup", 
-                    help="Режим модели: warmup (без c_m) или molcalib (с c_m)")
+                    help="Минимальная ошибка std_reg (автовывод из meta, если не указано)")
+parser.add_argument("--protocol", type=str, choices=["pretrain", "warmup", "molcalib"], default=None, 
+                    help="Режим модели (автовывод из meta, если не указано)")
 parser.add_argument("--out", type=str, default="", 
-                    help="Явный путь к выходному графику Z-score (по умолчанию - как имя модели с .png)")
+                    help="Явный путь к выходному графику Z-score")
 parser.add_argument("--meta", type=str, default="", 
-                    help="Явный путь к .meta файлу (по умолчанию выводится из имени модели)")
+                    help="Явный путь к .meta или .json файлу (автовывод из имени state)")
 
 args, unknown = parser.parse_known_args()
-
-# --- НАСТРОЙКИ ПУТЕЙ И ПАРАМЕТРОВ ---
-SPECT_SET = args.nucleus
-CV_I = args.cv_i
-DATASET_DIR = "graph_conv_many_nuc_pipeline.datasets"
-DATASET_NAME = "nmrshiftdb_hconfspcl_nmrshiftdb"
-MAT_PROPS = "aromatic"
-TGT_MAX_N = 64
-
-INFILE = os.path.join(DATASET_DIR, f"graph_conv_many_nuc_pipeline.data.{SPECT_SET}.{DATASET_NAME}.{MAT_PROPS}.{TGT_MAX_N}.{CV_I}.mol_dict.pickle")
 INPUT_PATH = args.state
 
-# Автоматическое определение META_FILE
+# 1. АВТООПРЕДЕЛЕНИЕ ПУТИ К МЕТАДАННЫМ
 if args.meta:
     META_FILE = args.meta
 else:
@@ -52,21 +42,63 @@ else:
             break
     else:
         base_name = os.path.splitext(INPUT_PATH)[0]
+    
+    # Ищем meta или json
     META_FILE = base_name + ".meta"
+    if not os.path.exists(META_FILE) and os.path.exists(base_name + ".json"):
+        META_FILE = base_name + ".json"
 
-# Создание .model файла при необходимости
+# 2. ЗАГРУЗКА МЕТАДАННЫХ
+if not os.path.exists(META_FILE):
+    raise FileNotFoundError(f"Файл метаданных не найден: {META_FILE}. Укажите его явно через --meta")
+
+print(f"Чтение параметров из {META_FILE}...")
+if META_FILE.endswith('.json'):
+    with open(META_FILE, 'r') as f:
+        meta_data = json.load(f)
+else:
+    with open(META_FILE, 'rb') as f:
+        meta_data = pickle.load(f)
+
+# 3. УМНЫЙ ПАРСИНГ ПАРАМЕТРОВ (Приоритет: аргументы CMD -> метаданные)
+SPECT_SET = args.nucleus if args.nucleus is not None else meta_data.get('tgt_nucs', ['13C'])[0]
+PROTOCOL = args.protocol if args.protocol is not None else meta_data.get('stage', 'warmup')
+
+if args.min_error is not None:
+    STD_REGULARIZE = args.min_error
+else:
+    loss_params = meta_data.get('loss_params', {})
+    STD_REGULARIZE = loss_params.get('std_regularize', 0.8 if SPECT_SET == '13C' else 0.03)
+
+if args.cv_i is not None:
+    CV_I = args.cv_i
+else:
+    infile_path = meta_data.get('infile', '')
+    try:
+        parts = infile_path.split('.')
+        idx = parts.index('mol_dict')
+        CV_I = int(parts[idx-1])
+    except:
+        CV_I = 0
+
+# Берем точный путь датасета из обучения
+INFILE = meta_data.get('infile', os.path.join("graph_conv_many_nuc_pipeline.datasets", 
+                       f"graph_conv_many_nuc_pipeline.data.{SPECT_SET}.nmrshiftdb_hconfspcl_nmrshiftdb.aromatic.64.{CV_I}.mol_dict.pickle"))
+
+APPLY_CM = (PROTOCOL == "molcalib")
+
+# 4. РАБОТА С ФАЙЛАМИ МОДЕЛИ
 if INPUT_PATH.endswith(".state"):
     MODEL_FILE = INPUT_PATH.replace(".state", ".model")
     if not os.path.exists(MODEL_FILE):
         print(f"Обнаружен .state файл, но файл {MODEL_FILE} отсутствует.")
         print("Автоматическая сборка и сохранение недостающего .model файла...")
         try:
-            with open(META_FILE, 'rb') as f:
-                meta_data = pickle.load(f)
             net_params = meta_data['net_params']
             temp_net = nets.GraphVertModel(**net_params)
             temp_net.load_state_dict(torch.load(INPUT_PATH, map_location='cpu'))
             temp_net = temp_net.cuda()
+            temp_net.eval()
             torch.save(temp_net, MODEL_FILE)
             print(f"Успешно создан файл модели: {MODEL_FILE}")
         except Exception as e:
@@ -74,7 +106,6 @@ if INPUT_PATH.endswith(".state"):
 else:
     MODEL_FILE = INPUT_PATH
 
-# Автоматическое определение выходных файлов
 if args.out:
     OUT_FILE_Z = args.out
     base_out = os.path.splitext(OUT_FILE_Z)[0]
@@ -84,25 +115,17 @@ else:
     OUT_FILE_Z = base_out + ".png"
     OUT_FILE_STATS = base_out + "_stats.png"
 
-if args.min_error is not None:
-    STD_REGULARIZE = args.min_error
-else:
-    STD_REGULARIZE = 0.8 if SPECT_SET == '13C' else 0.08
-
-APPLY_CM = (args.protocol == "molcalib")
-
 USE_CUDA = True
 BATCH_SIZE = 16
 
+# ================= ФУНКЦИИ ОТРИСОВКИ =================
 def analyze_and_plot_z(z_values, title_prefix, axes):
-    """Строит графики Z-score"""
     nu, loc, scale = stats.t.fit(z_values)
     print(f"[{title_prefix}] Z-score t-Student fit: nu (df) = {nu:.2f}, loc = {loc:.4f}, scale = {scale:.4f}")
     
     x = np.linspace(-8, 8, 1000)
     pdf_t = stats.t.pdf(x, nu, loc, scale)
     cdf_t = stats.t.cdf(x, nu, loc, scale)
-    
     pdf_norm = stats.norm.pdf(x, 0, 1)
     cdf_norm = stats.norm.cdf(x, 0, 1)
 
@@ -133,13 +156,10 @@ def analyze_and_plot_z(z_values, title_prefix, axes):
     ax_cdf.legend()
 
 def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg):
-    """Строит гистограммы для Sigma и C_m"""
     ax_sigma, ax_cm = axes
     
-    # Гистограмма Sigma (неопределенность)
     ax_sigma.hist(sigma_vals, bins=100, color='teal', alpha=0.7)
     mean_sigma = np.mean(sigma_vals)
-    median_sigma = np.median(sigma_vals)
     ax_sigma.axvline(mean_sigma, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {mean_sigma:.3f}')
     ax_sigma.axvline(std_reg, color='black', linestyle='dotted', linewidth=2, label=f'Min Reg: {std_reg:.3f}')
     ax_sigma.set_title(f'{title_prefix}: Распределение Sigma ($\sigma$)')
@@ -148,10 +168,7 @@ def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg):
     ax_sigma.grid(alpha=0.3)
     ax_sigma.legend()
 
-    # Гистограмма C_m (калибровочный сдвиг молекулы)
-    # Для C_m берем только уникальные значения (по одному на молекулу), удаляя NaN
     unique_cm = np.unique(cm_vals[~np.isnan(cm_vals)])
-    # Убираем экстремальные выбросы C_m для красивого графика
     q_low, q_high = np.percentile(unique_cm, [1, 99]) if len(unique_cm) > 0 else (-1, 1)
     filtered_cm = unique_cm[(unique_cm > q_low) & (unique_cm < q_high)]
     
@@ -163,29 +180,35 @@ def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg):
     ax_cm.set_title(f'{title_prefix}: Сдвиг молекулы (C_m) [Только 1-99 перцентиль]')
     ax_cm.set_xlabel('C_m [ppm]')
     ax_cm.set_ylabel('Частота (молекулы)')
-    # Добавляем текстовый блок со статистикой
     ax_cm.text(0.05, 0.95, f'Std: {std_cm:.3f}', transform=ax_cm.transAxes, 
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     ax_cm.grid(alpha=0.3)
     ax_cm.legend()
 
 def main():
-    print(f"--- НАСТРОЙКИ ЗАПУСКА ---")
+    print(f"--- НАСТРОЙКИ ЗАПУСКА (АВТООПРЕДЕЛЕНИЕ) ---")
     print(f"Ядро:\t\t{SPECT_SET} (cv_i: {CV_I})")
     print(f"Модель:\t\t{MODEL_FILE}")
+    print(f"Датасет:\t{os.path.basename(INFILE)}")
     print(f"Мин. ошибка:\t{STD_REGULARIZE} ppm")
-    print(f"Сдвиг c_m:\t{'ВКЛЮЧЕН в лосс (molcalib)' if APPLY_CM else 'Вычисляется для справки (warmup)'}")
+    print(f"Режим:\t\t{PROTOCOL} {'(C_m включен в лосс)' if APPLY_CM else '(C_m вычисляется для справки)'}")
     print(f"Сохранение Z:\t{OUT_FILE_Z}")
-    print(f"Сохранение Stats:\t{OUT_FILE_STATS}")
-    print(f"-------------------------\n")
+    print(f"-------------------------------------------\n")
 
-    print(f"Загрузка датасета {INFILE}...")
+    if not os.path.exists(INFILE):
+        raise FileNotFoundError(f"Файл датасета не найден: {INFILE}")
+
+    print(f"Загрузка датасета...")
     with open(INFILE, 'rb') as f:
         d = pickle.load(f)
     
     train_df = d['train_df']
     test_df = d['test_df']
-    print(f"Размер train: {len(train_df)} молекул.")
+    
+    # Фильтрация >= 5 ядер, как при обучении
+    train_df = train_df[train_df.value.map(len) >= 5]
+    test_df = test_df[test_df.value.map(len) >= 5]
+    print(f"Размер train: {len(train_df)} молекул. Размер test: {len(test_df)} молекул.")
 
     print(f"Загрузка модели...")
     model = PredModel(META_FILE, MODEL_FILE, USE_CUDA=USE_CUDA)
@@ -199,17 +222,16 @@ def main():
         res_test = model.pred(test_df.rdmol.tolist(), test_df.value.tolist(), BATCH_SIZE=BATCH_SIZE, prog_bar=True)
 
     def process_predictions(res_df, std_reg, apply_cm):
-        """ Считает Z-score, возвращая также массивы sigma и c_m """
         true_std = res_df['pred_std'] + std_reg
         
-        # Всегда вычисляем C_m (даже в warmup, чтобы посмотреть на него)
+        # Для pretrain дисперсия sigma случайна, c_m будет неадекватным. 
+        # Но чтобы графики не падали с ошибками, считаем его.
         res_df['w'] = 1.0 / (true_std ** 2)
         delta = res_df['value'] - res_df['pred_mu']
         res_df['weighted_delta'] = delta * res_df['w']
         c_m_series = res_df.groupby('m_pos')['weighted_delta'].sum() / res_df.groupby('m_pos')['w'].sum()
         res_df['computed_c_m'] = res_df['m_pos'].map(c_m_series)
         
-        # Если molcalib, применяем C_m для расчета Z-score, если warmup - не применяем (оставляем 0)
         c_m_to_apply = res_df['computed_c_m'] if apply_cm else 0.0
         
         res_df['calib_mu'] = res_df['pred_mu'] + c_m_to_apply
