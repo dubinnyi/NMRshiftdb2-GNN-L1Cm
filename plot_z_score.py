@@ -38,6 +38,7 @@ if args.meta:
 else:
     base_name = INPUT_PATH
     for ext in ['.best.state', '.state', '.model', '.best.model']:
+        if base_name.endswith(ext):
             base_name = base_name[:-len(ext)]
             break
     else:
