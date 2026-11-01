@@ -7,6 +7,7 @@ import scipy.stats as stats
 import torch
 import argparse
 import json
+import re
 
 from graph_conv_many_nuc_util import PredModel
 import nets
@@ -43,10 +44,14 @@ else:
     else:
         base_name = os.path.splitext(INPUT_PATH)[0]
     
+    # Убираем суффикс с номером эпохи (например, .00000000), если он есть
+    base_name = re.sub(r'\.\d{8}$', '', base_name)
+    
     # Ищем meta или json
     META_FILE = base_name + ".meta"
     if not os.path.exists(META_FILE) and os.path.exists(base_name + ".json"):
         META_FILE = base_name + ".json"
+
 
 # 2. ЗАГРУЗКА МЕТАДАННЫХ
 if not os.path.exists(META_FILE):
