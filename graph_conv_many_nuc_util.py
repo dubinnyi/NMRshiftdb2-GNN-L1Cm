@@ -70,13 +70,14 @@ def dict_combine(d1, d2):
     d1.update(d2)
     return d1
 
+
 def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
     d = pickle.load(open(exp_config['filename'], 'rb'))
     train_df = d['train_df']
     test_df = d['test_df'] 
     
     if min_atoms > 0:
-        # ИСПРАВЛЕНО: считаем именно количество реальных целевых ядер (1H) в словаре спектра
+        # Считаем именно количество реальных целевых ядер (1H) в словаре спектра
         train_df = train_df[train_df.value.map(lambda x: len(x[0]) >= min_atoms)]
         test_df = test_df[test_df.value.map(lambda x: len(x[0]) >= min_atoms)]
 
@@ -88,13 +89,14 @@ def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
     MAX_N = d['MAX_N']
     datasets = {}
 
-    ds = netdataio.MoleculeDatasetMulti(df.rdmol.tolist(), 
+    for phase, df in [('train', train_df), ('test', test_df)]:
+        ds = netdataio.MoleculeDatasetMulti(df.rdmol.tolist(), 
                                             df.value.tolist(),  
                                             MAX_N, len(tgt_nucs), 
                                             hparams['feat_vect_args'], 
                                             hparams['feat_mat_args'], 
                                             hparams['adj_args'])        
-    datasets[phase] = ds
+        datasets[phase] = ds
 
     return datasets['train'], datasets['test']
 
