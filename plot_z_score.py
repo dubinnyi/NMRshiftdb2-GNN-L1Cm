@@ -38,7 +38,6 @@ if args.meta:
 else:
     base_name = INPUT_PATH
     for ext in ['.best.state', '.state', '.model', '.best.model']:
-        if base_name.endswith(ext):
             base_name = base_name[:-len(ext)]
             break
     else:
@@ -211,8 +210,8 @@ def main():
     test_df = d['test_df']
     
     # Фильтрация >= 5 ядер, как при обучении
-    train_df = train_df[train_df.value.map(len) >= 5]
-    test_df = test_df[test_df.value.map(len) >= 5]
+    train_df = train_df[train_df.value.map(lambda x: len(x[0]) >= 5)]
+    test_df = test_df[test_df.value.map(lambda x: len(x[0]) >= 5)]
     print(f"Размер train: {len(train_df)} молекул. Размер test: {len(test_df)} молекул.")
 
     print(f"Загрузка модели...")
