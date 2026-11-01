@@ -88,7 +88,6 @@ def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
     MAX_N = d['MAX_N']
     datasets = {}
 
-    for phase, df in [('train', train_df), ('test', test_df)]:
         ds = netdataio.MoleculeDatasetMulti(df.rdmol.tolist(), 
                                             df.value.tolist(),  
                                             MAX_N, len(tgt_nucs), 
@@ -206,11 +205,17 @@ def run_epoch(net, optimizer, criterion, dl,
             'time' : t2_total-t1_total, 
             'compute_time' : total_compute_time, 
             }
+
     if return_pred:
-        keys = accum_pred[0].keys()
-        for k in keys:
-            accum_pred_v = np.vstack([a[k] for a in accum_pred])
-            res[f'pred_{k}'] = accum_pred_v
+        if len(accum_pred) > 0:
+            keys = accum_pred[0].keys()
+            for k in keys:
+                accum_pred_v = np.vstack([a[k] for a in accum_pred])
+                res[f'pred_{k}'] = accum_pred_v
+        else:
+            # Защита от пустого датасета
+            for k in ['mu', 'std', 'mask', 'truth', 'res']: 
+                res[f'pred_{k}'] = np.array([])
             
     return res
 
@@ -254,9 +259,10 @@ def generic_runner(net, optimizer, scheduler, criterion,
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
 
+
             # --- ЛОГИКА РАННЕЙ ОСТАНОВКИ ---
             test_loss = test_res['running_loss'] / test_res['total_points']
-            early_stopping(test_loss)
+            early_stopping(test_loss, net)  # <--- ПЕРЕДАЕМ NET
         
             for metric_name, metric_val in validate_func(test_res).items():
                 writer.add_scalar(metric_name, metric_val, epoch_i)
@@ -272,6 +278,12 @@ def generic_runner(net, optimizer, scheduler, criterion,
             print(f"\n--- ОБУЧЕНИЕ ОСТАНОВЛЕНО ДОСРОЧНО на эпохе {epoch_i} ---")
             print(f"Валидационный Loss не улучшался последние {early_stopping.patience * 5} эпох.")
             break
+            
+    # === ВОССТАНОВЛЕНИЕ ЛУЧШИХ ВЕСОВ В КОНЦЕ ЦИКЛА ===
+    if early_stopping.best_state is not None:
+        print(f"Восстановление лучших весов модели (Loss: {early_stopping.best_loss:.4f}) перед завершением этапа.")
+        net.load_state_dict(early_stopping.best_state)
+
 
 def move(tensor, cuda=False):
     if cuda:
@@ -414,9 +426,10 @@ def create_uncertain_validate_func(tgt_nucs):
     return val_func
 
 
+
 class EarlyStopping:
     """
-    Ранняя остановка обучения, если валидационный loss не улучшается.
+    Ранняя остановка с автоматическим восстановлением лучших весов модели.
     """
     def __init__(self, patience=20, min_delta=1e-4):
         self.patience = patience
@@ -424,10 +437,12 @@ class EarlyStopping:
         self.counter = 0
         self.best_loss = None
         self.early_stop = False
+        self.best_state = None  # <--- Хранилище для лучших весов
 
-    def __call__(self, val_loss):
+    def __call__(self, val_loss, model): # <--- Теперь принимает саму модель
         if self.best_loss is None:
             self.best_loss = val_loss
+            self.best_state = copy.deepcopy(model.state_dict())
         elif val_loss > self.best_loss - self.min_delta:
             self.counter += 1
             print(f"  [EarlyStop] Нет улучшений. Счетчик: {self.counter}/{self.patience}. Лучший Loss: {self.best_loss:.4f}")
@@ -436,4 +451,6 @@ class EarlyStopping:
         else:
             print(f"  [EarlyStop] Улучшение! Loss снизился с {self.best_loss:.4f} до {val_loss:.4f}")
             self.best_loss = val_loss
+            self.best_state = copy.deepcopy(model.state_dict()) # <--- Сохраняем слепок лучших весов
             self.counter = 0
+
