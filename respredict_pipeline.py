@@ -29,8 +29,8 @@ from graph_conv_many_nuc_util import move
 
 # === 1. ПАРСИНГ АРГУМЕНТОВ КОМАНДНОЙ СТРОКИ ===
 parser = argparse.ArgumentParser(description="NMR GNN Training Pipeline")
-parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib", "auto"], default="auto", 
-                    help="Режим обучения: warmup, molcalib, или auto (warmup -> molcalib)")
+parser.add_argument("--protocol", type=str, choices=["pretrain", "warmup", "molcalib", "auto"], default="auto", 
+                    help="Режим: pretrain (только mu), warmup (mu+sigma), molcalib (+c_m), auto (все по очереди)")
 parser.add_argument("--weights", type=str, default="", 
                     help="Путь к файлу предобученных весов (.state)")
 parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
@@ -139,11 +139,18 @@ def train(infile, outfile, seed):
     # -----------------------------------------------------
     BATCH_SIZE = 128
     dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
-
     ds_train, ds_test = graph_conv_many_nuc_util.make_datasets({'filename' : infile}, 
                                                                dataset_hparams, 
                                                                min_atoms=MIN_ATOMS)
                                                                
+    # === ЯВНАЯ ФИЛЬТРАЦИЯ ПО КОЛИЧЕСТВУ ЦЕЛЕВЫХ ЯДЕР (>= 5 атомов) ===
+    # Элемент датасета: (G, x, tgt_out_rows, target_values, mask, m_pos)
+    # Количество целевых ядер равно длине массива target_values (индекс 3)
+    print(f"До фильтрации >=5 целевых ядер {SPECT_SET}: Train={len(ds_train)}, Test={len(ds_test)}")
+    ds_train = [item for item in ds_train if len(item[3]) >= 5]
+    ds_test = [item for item in ds_test if len(item[3]) >= 5]
+    print(f"После фильтрации >=5 целевых ядер {SPECT_SET}: Train={len(ds_train)}, Test={len(ds_test)}")
+    
     dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
     dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
 
@@ -170,26 +177,35 @@ def train(infile, outfile, seed):
     std_scale_t = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
     
     # Определяем, какие этапы запускать
-    protocols_to_run = ["warmup", "molcalib"] if PROTOCOL == "auto" else [PROTOCOL]
+    if PROTOCOL == "auto":
+        protocols_to_run = ["pretrain", "warmup", "molcalib"]
+    else:
+        protocols_to_run = [PROTOCOL]
 
     # === 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК ЭТАПОВ ===
     for stage_protocol in protocols_to_run:
         opt_params = opt_params_base.copy()
         
+        stage_max_epochs = MAX_EPOCHS
+
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
             print("=== RUNNING STAGE: MOLCALIB (FINE-TUNING) ===")
-            opt_params['lr'] = 1e-5  # Снижаем LR для дообучения
-            criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, 
-                                                          std_scale_t,
-                                                          std_regularize = loss_config['std_regularize'],
-                                                          lambda_penalty = LAMBDA_PENALTY)
-        else:
+            opt_params['lr'] = 1e-5
+            criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
+                                                          std_regularize=loss_config['std_regularize'],
+                                                          lambda_penalty=LAMBDA_PENALTY)
+        elif stage_protocol == 'pretrain':
+            print("=== RUNNING STAGE: PRETRAIN (L1 LOSS ONLY) ===")
+            opt_params['lr'] = 1e-4  # Хороший шаг для быстрого сдвига mu
+            criterion = nets.MaskedL1Loss(mu_scale_t)
+            stage_max_epochs = 300 
+        else: # warmup
             print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
             opt_params['lr'] = 1e-4
-            criterion = nets.NormUncertainLoss(mu_scale_t, 
-                                               std_scale_t,
-                                               std_regularize = loss_config['std_regularize'])
+            criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
+                                               std_regularize=loss_config['std_regularize'])
+            stage_max_epochs = 300
         print("="*60 + "\n")
 
         validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
@@ -225,22 +241,22 @@ def train(infile, outfile, seed):
         # Запуск обучения для текущего этапа (встроенная функция EarlyStopping прервет цикл при необходимости)
         graph_conv_many_nuc_util.generic_runner(net, optimizer, scheduler, criterion, 
                                                 dl_train, dl_test, 
-                                                MAX_EPOCHS=MAX_EPOCHS, 
+                                                MAX_EPOCHS=stage_max_epochs, 
                                                 USE_CUDA=USE_CUDA, writer=writer, 
                                                 validate_func= validate_func, 
                                                 checkpoint_func= checkpoint_func)
                                                 
         # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
-        best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
+        best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
         best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.model")
 
         # Если ранее была применена обертка DataParallel для нескольких GPU,
         # нужно сохранять внутренний модуль (net.module), а не саму обертку.
         if isinstance(net, torch.nn.DataParallel):
-            torch.save(net.module.state_dict(), best_model_path)
+            torch.save(net.module.state_dict(), best_state_path)
             torch.save(net.module, best_model_path)
         else:
-            torch.save(net.state_dict(), best_model_path)
+            torch.save(net.state_dict(), best_state_path)
             torch.save(net, best_model_path)
         print(f"Финальные веса этапа {stage_protocol} сохранены :\n  {best_state_path}\n  {best_model_path}")
         # --------------------------
@@ -259,4 +275,4 @@ if __name__ == "__main__":
         except OSError:
             pass
             
-    pipeline_run([train]) 
+    pipeline_run([train])

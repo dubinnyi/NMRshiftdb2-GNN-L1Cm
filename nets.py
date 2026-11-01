@@ -699,6 +699,33 @@ class MaskedMSEScaledLoss(nn.Module):
         y_masked = y[mask>0].reshape(-1, 1)
         return self.mseloss(x_masked, y_masked)
 
+
+class MaskedL1Loss(nn.Module):
+    """
+    Протокол предварительного обучения: минимизирует только ошибку предсказания (MAE), 
+    игнорируя предсказанную неопределенность (sigma), чтобы избежать паралича градиентов.
+    """
+    def __init__(self, mu_scale):
+        super(MaskedL1Loss, self).__init__()
+        self.mu_scale = mu_scale
+
+    def __call__(self, pred, y, mask):
+        # Принудительно в FP32 для защиты от NaN
+        mu = pred['mu'].float()
+        y = y.float()
+        mask = mask.float()
+
+        mu_scale = self.mu_scale.to(y.device).float()
+
+        y_scaled = y / mu_scale
+        mu_scaled = mu / mu_scale
+
+        # Считаем модуль разницы только для реальных атомов (где mask > 0)
+        abs_diff = torch.abs(y_scaled[mask > 0] - mu_scaled[mask > 0])
+        
+        return abs_diff.mean()
+
+
 class NormUncertainLoss(nn.Module):
     def __init__(self, 
                  mu_scale = torch.Tensor([1.0]), 
@@ -733,7 +760,7 @@ class NormUncertainLoss(nn.Module):
         std_scaled = std / self.std_scale 
 
         y_scaled_masked = y_scaled[mask>0].reshape(-1, 1)
-        mu_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
+        u_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
         std_scaled_masked = std_scaled[mask>0].reshape(-1, 1)
 
         return -log_normal_nolog(y_scaled_masked, 
