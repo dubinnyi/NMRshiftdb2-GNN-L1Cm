@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import scipy.stats as stats
 import torch
 import argparse
-import json
 
 # Импортируем классы из скриптов проекта
 from graph_conv_many_nuc_util import PredModel
@@ -25,7 +24,7 @@ parser.add_argument("--min_error", type=float, default=None,
 parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default="warmup", 
                     help="Режим модели: warmup (без c_m) или molcalib (с c_m)")
 parser.add_argument("--out", type=str, default="", 
-                    help="Явный путь к выходному графику (по умолчанию - как имя модели с .png)")
+                    help="Явный путь к выходному графику Z-score (по умолчанию - как имя модели с .png)")
 parser.add_argument("--meta", type=str, default="", 
                     help="Явный путь к .meta файлу (по умолчанию выводится из имени модели)")
 
@@ -46,7 +45,6 @@ INPUT_PATH = args.state
 if args.meta:
     META_FILE = args.meta
 else:
-    # Убираем расширения вроде .best.state, .state или .model перед поиском .meta
     base_name = INPUT_PATH
     for ext in ['.best.state', '.state', '.model', '.best.model']:
         if base_name.endswith(ext):
@@ -56,7 +54,7 @@ else:
         base_name = os.path.splitext(INPUT_PATH)[0]
     META_FILE = base_name + ".meta"
 
-# Если передан .state файл, проверяем наличие эквивалентного .model файла. Если его нет — создаем автоматически.
+# Создание .model файла при необходимости
 if INPUT_PATH.endswith(".state"):
     MODEL_FILE = INPUT_PATH.replace(".state", ".model")
     if not os.path.exists(MODEL_FILE):
@@ -76,13 +74,16 @@ if INPUT_PATH.endswith(".state"):
 else:
     MODEL_FILE = INPUT_PATH
 
-# Автоматическое определение OUT_FILE
+# Автоматическое определение выходных файлов
 if args.out:
-    OUT_FILE = args.out
+    OUT_FILE_Z = args.out
+    base_out = os.path.splitext(OUT_FILE_Z)[0]
+    OUT_FILE_STATS = base_out + "_stats.png"
 else:
-    OUT_FILE = os.path.splitext(MODEL_FILE)[0] + ".png"
+    base_out = os.path.splitext(MODEL_FILE)[0]
+    OUT_FILE_Z = base_out + ".png"
+    OUT_FILE_STATS = base_out + "_stats.png"
 
-# Определение регуляризатора
 if args.min_error is not None:
     STD_REGULARIZE = args.min_error
 else:
@@ -93,12 +94,10 @@ APPLY_CM = (args.protocol == "molcalib")
 USE_CUDA = True
 BATCH_SIZE = 16
 
-def analyze_and_plot(z_values, title_prefix, axes):
-    """
-    Фитирует t-распределение и строит графики PDF и CDF
-    """
+def analyze_and_plot_z(z_values, title_prefix, axes):
+    """Строит графики Z-score"""
     nu, loc, scale = stats.t.fit(z_values)
-    print(f"[{title_prefix}] t-Student fit: nu (df) = {nu:.2f}, loc = {loc:.4f}, scale = {scale:.4f}")
+    print(f"[{title_prefix}] Z-score t-Student fit: nu (df) = {nu:.2f}, loc = {loc:.4f}, scale = {scale:.4f}")
     
     x = np.linspace(-8, 8, 1000)
     pdf_t = stats.t.pdf(x, nu, loc, scale)
@@ -133,15 +132,51 @@ def analyze_and_plot(z_values, title_prefix, axes):
     ax_cdf.grid(alpha=0.3)
     ax_cdf.legend()
 
+def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg):
+    """Строит гистограммы для Sigma и C_m"""
+    ax_sigma, ax_cm = axes
+    
+    # Гистограмма Sigma (неопределенность)
+    ax_sigma.hist(sigma_vals, bins=100, color='teal', alpha=0.7)
+    mean_sigma = np.mean(sigma_vals)
+    median_sigma = np.median(sigma_vals)
+    ax_sigma.axvline(mean_sigma, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {mean_sigma:.3f}')
+    ax_sigma.axvline(std_reg, color='black', linestyle='dotted', linewidth=2, label=f'Min Reg: {std_reg:.3f}')
+    ax_sigma.set_title(f'{title_prefix}: Распределение Sigma ($\sigma$)')
+    ax_sigma.set_xlabel('Предсказанная ошибка ($\sigma$) [ppm]')
+    ax_sigma.set_ylabel('Частота (атомы)')
+    ax_sigma.grid(alpha=0.3)
+    ax_sigma.legend()
+
+    # Гистограмма C_m (калибровочный сдвиг молекулы)
+    # Для C_m берем только уникальные значения (по одному на молекулу), удаляя NaN
+    unique_cm = np.unique(cm_vals[~np.isnan(cm_vals)])
+    # Убираем экстремальные выбросы C_m для красивого графика
+    q_low, q_high = np.percentile(unique_cm, [1, 99]) if len(unique_cm) > 0 else (-1, 1)
+    filtered_cm = unique_cm[(unique_cm > q_low) & (unique_cm < q_high)]
+    
+    ax_cm.hist(filtered_cm, bins=100, color='orange', alpha=0.7)
+    mean_cm = np.mean(filtered_cm) if len(filtered_cm) > 0 else 0
+    std_cm = np.std(filtered_cm) if len(filtered_cm) > 0 else 0
+    
+    ax_cm.axvline(mean_cm, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {mean_cm:.3f}')
+    ax_cm.set_title(f'{title_prefix}: Сдвиг молекулы (C_m) [Только 1-99 перцентиль]')
+    ax_cm.set_xlabel('C_m [ppm]')
+    ax_cm.set_ylabel('Частота (молекулы)')
+    # Добавляем текстовый блок со статистикой
+    ax_cm.text(0.05, 0.95, f'Std: {std_cm:.3f}', transform=ax_cm.transAxes, 
+               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    ax_cm.grid(alpha=0.3)
+    ax_cm.legend()
+
 def main():
     print(f"--- НАСТРОЙКИ ЗАПУСКА ---")
     print(f"Ядро:\t\t{SPECT_SET} (cv_i: {CV_I})")
-    print(f"Входной файл:\t{INPUT_PATH}")
-    print(f"Модель для загрузки: {MODEL_FILE}")
-    print(f"Meta файл:\t{META_FILE}")
+    print(f"Модель:\t\t{MODEL_FILE}")
     print(f"Мин. ошибка:\t{STD_REGULARIZE} ppm")
-    print(f"Сдвиг c_m:\t{'ВКЛЮЧЕН (molcalib)' if APPLY_CM else 'ОТКЛЮЧЕН (warmup)'}")
-    print(f"Сохранение в:\t{OUT_FILE}")
+    print(f"Сдвиг c_m:\t{'ВКЛЮЧЕН в лосс (molcalib)' if APPLY_CM else 'Вычисляется для справки (warmup)'}")
+    print(f"Сохранение Z:\t{OUT_FILE_Z}")
+    print(f"Сохранение Stats:\t{OUT_FILE_STATS}")
     print(f"-------------------------\n")
 
     print(f"Загрузка датасета {INFILE}...")
@@ -150,7 +185,7 @@ def main():
     
     train_df = d['train_df']
     test_df = d['test_df']
-    print(f"Размер train: {len(train_df)} молекул. Размер test: {len(test_df)} молекул.")
+    print(f"Размер train: {len(train_df)} молекул.")
 
     print(f"Загрузка модели...")
     model = PredModel(META_FILE, MODEL_FILE, USE_CUDA=USE_CUDA)
@@ -163,36 +198,47 @@ def main():
     with torch.no_grad():
         res_test = model.pred(test_df.rdmol.tolist(), test_df.value.tolist(), BATCH_SIZE=BATCH_SIZE, prog_bar=True)
 
-    def compute_calibrated_z(res_df, std_reg=0.8, apply_cm=True):
-        """ Считает Z-score с учетом c_m и регуляризатора дисперсии """
+    def process_predictions(res_df, std_reg, apply_cm):
+        """ Считает Z-score, возвращая также массивы sigma и c_m """
         true_std = res_df['pred_std'] + std_reg
         
-        if apply_cm:
-            res_df['w'] = 1.0 / (true_std ** 2)
-            delta = res_df['value'] - res_df['pred_mu']
-            res_df['weighted_delta'] = delta * res_df['w']
-            c_m_series = res_df.groupby('m_pos')['weighted_delta'].sum() / res_df.groupby('m_pos')['w'].sum()
-            res_df['c_m'] = res_df['m_pos'].map(c_m_series)
-        else:
-            res_df['c_m'] = 0.0
+        # Всегда вычисляем C_m (даже в warmup, чтобы посмотреть на него)
+        res_df['w'] = 1.0 / (true_std ** 2)
+        delta = res_df['value'] - res_df['pred_mu']
+        res_df['weighted_delta'] = delta * res_df['w']
+        c_m_series = res_df.groupby('m_pos')['weighted_delta'].sum() / res_df.groupby('m_pos')['w'].sum()
+        res_df['computed_c_m'] = res_df['m_pos'].map(c_m_series)
         
-        res_df['calib_mu'] = res_df['pred_mu'] + res_df['c_m']
+        # Если molcalib, применяем C_m для расчета Z-score, если warmup - не применяем (оставляем 0)
+        c_m_to_apply = res_df['computed_c_m'] if apply_cm else 0.0
+        
+        res_df['calib_mu'] = res_df['pred_mu'] + c_m_to_apply
         res_df['z'] = (res_df['value'] - res_df['calib_mu']) / true_std
         
-        return res_df['z'].replace([np.inf, -np.inf], np.nan).dropna().values
+        z_clean = res_df['z'].replace([np.inf, -np.inf], np.nan).dropna().values
+        sigma_clean = true_std.dropna().values
+        cm_clean = res_df['computed_c_m'].values
+        
+        return z_clean, sigma_clean, cm_clean
 
-    z_train = compute_calibrated_z(res_train, std_reg=STD_REGULARIZE, apply_cm=APPLY_CM)
-    z_test = compute_calibrated_z(res_test, std_reg=STD_REGULARIZE, apply_cm=APPLY_CM)
+    print("\nПостроение графиков Z-Score...")
+    z_train, sig_train, cm_train = process_predictions(res_train, STD_REGULARIZE, APPLY_CM)
+    z_test, sig_test, cm_test = process_predictions(res_test, STD_REGULARIZE, APPLY_CM)
 
-    print("\nПостроение графиков и фитирование...")
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-    analyze_and_plot(z_train, "Train", axes[:, 0]) 
-    analyze_and_plot(z_test, "Test", axes[:, 1])   
-    
+    fig_z, axes_z = plt.subplots(2, 2, figsize=(14, 10))
+    analyze_and_plot_z(z_train, "Train", axes_z[:, 0]) 
+    analyze_and_plot_z(z_test, "Test", axes_z[:, 1])   
     plt.tight_layout()
-    plt.savefig(OUT_FILE, dpi=300)
-    print(f"Готово! Графики сохранены в файл '{OUT_FILE}'")
+    fig_z.savefig(OUT_FILE_Z, dpi=300)
+    print(f"Графики Z-score сохранены в: '{OUT_FILE_Z}'")
+
+    print("\nПостроение графиков статистики (Sigma и C_m)...")
+    fig_s, axes_s = plt.subplots(2, 2, figsize=(14, 10))
+    plot_stats(sig_train, cm_train, "Train", axes_s[:, 0], STD_REGULARIZE)
+    plot_stats(sig_test, cm_test, "Test", axes_s[:, 1], STD_REGULARIZE)
+    plt.tight_layout()
+    fig_s.savefig(OUT_FILE_STATS, dpi=300)
+    print(f"Графики статистики сохранены в: '{OUT_FILE_STATS}'")
 
 if __name__ == "__main__":
     main()
