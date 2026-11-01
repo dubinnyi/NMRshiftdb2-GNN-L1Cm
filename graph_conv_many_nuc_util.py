@@ -88,13 +88,13 @@ def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
     MAX_N = d['MAX_N']
     datasets = {}
 
-        ds = netdataio.MoleculeDatasetMulti(df.rdmol.tolist(), 
+    ds = netdataio.MoleculeDatasetMulti(df.rdmol.tolist(), 
                                             df.value.tolist(),  
                                             MAX_N, len(tgt_nucs), 
                                             hparams['feat_vect_args'], 
                                             hparams['feat_mat_args'], 
                                             hparams['adj_args'])        
-        datasets[phase] = ds
+    datasets[phase] = ds
 
     return datasets['train'], datasets['test']
 
