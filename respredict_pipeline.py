@@ -134,6 +134,8 @@ def train(infile, outfile, seed):
     assert len(mu_scale) == len(tgt_nucs)
     assert len(std_scale) == len(tgt_nucs)
     
+
+
     # -----------------------------------------------------
     # Настройка Dataloader (фильтрация по мин. числу атомов)
     # -----------------------------------------------------
@@ -143,13 +145,7 @@ def train(infile, outfile, seed):
                                                                dataset_hparams, 
                                                                min_atoms=MIN_ATOMS)
                                                                
-    # === ЯВНАЯ ФИЛЬТРАЦИЯ ПО КОЛИЧЕСТВУ ЦЕЛЕВЫХ ЯДЕР (>= 5 атомов) ===
-    # Элемент датасета: (G, x, tgt_out_rows, target_values, mask, m_pos)
-    # Количество целевых ядер равно длине массива target_values (индекс 3)
-    print(f"До фильтрации >=5 целевых ядер {SPECT_SET}: Train={len(ds_train)}, Test={len(ds_test)}")
-    ds_train = [item for item in ds_train if len(item[3]) >= 5]
-    ds_test = [item for item in ds_test if len(item[3]) >= 5]
-    print(f"После фильтрации >=5 целевых ядер {SPECT_SET}: Train={len(ds_train)}, Test={len(ds_test)}")
+    print(f"Размер выборки (>= {MIN_ATOMS} целевых ядер {SPECT_SET}): Train={len(ds_train)}, Test={len(ds_test)}")
     
     dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
     dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)

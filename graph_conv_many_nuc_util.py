@@ -76,12 +76,13 @@ def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
     test_df = d['test_df'] 
     
     if min_atoms > 0:
-        train_df = train_df[train_df.rdmol.apply(lambda x: x.GetNumAtoms() > min_atoms)]
-        test_df = test_df[test_df.rdmol.apply(lambda x: x.GetNumAtoms() > min_atoms)]
+        # ИСПРАВЛЕНО: считаем именно количество реальных целевых ядер (1H) в словаре спектра
+        train_df = train_df[train_df.value.map(lambda x: len(x[0]) >= min_atoms)]
+        test_df = test_df[test_df.value.map(lambda x: len(x[0]) >= min_atoms)]
 
     if train_sample > 0:
         print("WARNING, subsampling training data to ", train_sample)
-        train_df = train_df.sample(train_sample, random_state=0) 
+        train_df = train_df.sample(train_sample, random_state=0)
 
     tgt_nucs = d['tgt_nucs']
     MAX_N = d['MAX_N']
