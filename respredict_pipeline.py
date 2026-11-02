@@ -18,6 +18,7 @@ import torch
 from torch import nn
 from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader
+import warnings
 
 import util
 import nets
@@ -27,10 +28,13 @@ import itertools
 import graph_conv_many_nuc_util
 from graph_conv_many_nuc_util import move
 
+# Ignore PyTorch warning about lr_scheduler
+warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step()` before `optimizer.step()`")
+
 # === 1. ПАРСИНГ АРГУМЕНТОВ КОМАНДНОЙ СТРОКИ ===
 parser = argparse.ArgumentParser(description="NMR GNN Training Pipeline")
-parser.add_argument("--protocol", type=str, choices=["pretrain", "warmup", "molcalib", "auto"], default="auto", 
-                    help="Режим: pretrain (только mu), warmup (mu+sigma), molcalib (+c_m), auto (все по очереди)")
+parser.add_argument("--protocol", type=str, default="auto", 
+                    help="Режим: pretrain, warmup, molcalib, auto. Можно передавать списком через запятую: warmup,molcalib")
 parser.add_argument("--weights", type=str, default="", 
                     help="Путь к файлу предобученных весов (.state)")
 parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
@@ -187,7 +191,12 @@ def train(infile, outfile, seed):
     if PROTOCOL == "auto":
         protocols_to_run = ["pretrain", "warmup", "molcalib"]
     else:
-        protocols_to_run = [PROTOCOL]
+        # Разбиваем строку по запятой и удаляем пробелы
+        protocols_to_run = [p.strip() for p in PROTOCOL.split(',')]
+        valid_protocols = ["pretrain", "warmup", "molcalib"]
+        for p in protocols_to_run:
+            if p not in valid_protocols:
+                raise ValueError(f"Неизвестный этап: '{p}'. Разрешены только: {valid_protocols}")
 
     # === 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК ЭТАПОВ ===
     for stage_protocol in protocols_to_run:
