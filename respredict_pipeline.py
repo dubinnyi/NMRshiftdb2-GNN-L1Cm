@@ -221,10 +221,19 @@ def train(infile, outfile, seed):
             for param in net.gml.parameters():
                 param.requires_grad = False
 
+            # Замораживаем голову сигмы, чтобы оптимизатор даже не пытался её трогать
+            if hasattr(net, 'lin_out_std1'):
+                for param in net.lin_out_std1.parameters():
+                    param.requires_grad = False
+            if hasattr(net, 'lin_out_std2'):
+                for param in net.lin_out_std2.parameters():
+                    param.requires_grad = False
+
             opt_params['lr'] = 1e-3  # Большой шаг для быстрой настройки голов
-            stage_max_epochs = 100
-            criterion = nets.MaskedMSELossForPretrain(mu_scale_t, std_scale_t,  
-                  std_regularize=loss_config['std_regularize'])
+            stage_max_epochs = 1000
+            
+            # ЧИСТЫЙ MSE: передаем ТОЛЬКО mu_scale_t
+            criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
 
         else: # warmup
             print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
