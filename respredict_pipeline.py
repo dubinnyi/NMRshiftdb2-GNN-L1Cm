@@ -75,7 +75,6 @@ if SPECT_SET == '13C':
 else:
     NUC_LOSS_SCALE = {'1H' : 1.0}
     NUC_STD_SCALE = {'1H' : 1.0} 
-    STD_REGULARIZE = 0.03
 
 tgt_max_n = 64 
 MIN_ATOMS = 5
@@ -201,8 +200,11 @@ def train(infile, outfile, seed):
     # === 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК ЭТАПОВ ===
     for stage_protocol in protocols_to_run:
         opt_params = opt_params_base.copy()
-        
         stage_max_epochs = MAX_EPOCHS
+
+        # По умолчанию все параметры разморожены (для warmup и molcalib)
+        for param in net.parameters():
+            param.requires_grad = True
 
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
@@ -214,9 +216,15 @@ def train(infile, outfile, seed):
 
         elif stage_protocol == 'pretrain':
             print("=== RUNNING STAGE: PRETRAIN (MSE LOSS ONLY) ===")
-            opt_params['lr'] = 1e-3  # <-- Увеличено в 10 раз
-            criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
-            stage_max_epochs = 300
+
+            # Замораживаем весь экстрактор (оставляем только финальные слои)
+            for param in net.gml.parameters():
+                param.requires_grad = False
+
+            opt_params['lr'] = 1e-3  # Большой шаг для быстрой настройки голов
+            stage_max_epochs = 100
+            criterion = nets.MaskedMSELossForPretrain(mu_scale_t, std_scale_t,  
+                  std_regularize=loss_config['std_regularize'])
 
         else: # warmup
             print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
@@ -232,7 +240,8 @@ def train(infile, outfile, seed):
 
         validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
 
-        optimizer = torch.optim.Adam(net.parameters(), lr=opt_params['lr'], 
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), 
+                                     lr=opt_params['lr'], 
                                      amsgrad=opt_params['amsgrad'], 
                                      eps=opt_params['eps'], 
                                      weight_decay=opt_params['weight_decay'])
