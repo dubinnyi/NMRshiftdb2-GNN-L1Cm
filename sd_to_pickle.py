@@ -6,7 +6,7 @@ from rdkit import Chem
 from tqdm import tqdm
 
 # === НАСТРОЙКИ ===
-SDF_FILE = "nmrshiftdb2withsignals.sd"
+SDF_FILE = "nmrshiftdb2/nmrshiftdb2withsignals.sd"
 OUTPUT_DIR = "graph_conv_many_nuc_pipeline.datasets"
 MAX_N = 64  # ВНИМАНИЕ: Это лимит С УЧЕТОМ добавленных водородов
 TRAIN_SPLIT = 0.8
