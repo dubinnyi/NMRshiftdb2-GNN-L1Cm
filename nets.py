@@ -784,7 +784,7 @@ class NormUncertainLoss(nn.Module):
         std_scaled = std / self.std_scale 
 
         y_scaled_masked = y_scaled[mask>0].reshape(-1, 1)
-        u_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
+        mu_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
         std_scaled_masked = std_scaled[mask>0].reshape(-1, 1)
 
         return -log_normal_nolog(y_scaled_masked, 

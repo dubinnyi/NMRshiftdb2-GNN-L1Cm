@@ -41,6 +41,8 @@ parser.add_argument("--max_epochs", type=int, default=10000,
                     help="Максимальное количество эпох на один этап")
 parser.add_argument("--cv_i", type=int, default=0, 
                     help="Индекс кросс-валидации датасета (0, 1 и т.д.)")
+parser.add_argument("--smoke_test", action="store_true", 
+                    help="Быстрый прогон (2 батча, 2 эпохи) для проверки пайплайна на ошибки")
 args, unknown = parser.parse_known_args()
 
 SPECT_SET = args.nucleus
@@ -143,8 +145,17 @@ def train(infile, outfile, seed):
     dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
     ds_train, ds_test = graph_conv_many_nuc_util.make_datasets({'filename' : infile}, 
                                                                dataset_hparams, 
+        
                                                                min_atoms=MIN_ATOMS)
-                                                               
+    if args.smoke_test:
+        print("\n" + "!"*50)
+        print("!!! ВКЛЮЧЕН РЕЖИМ SMOKE TEST !!!")
+        print("Обрезаем датасет до 1 батча для мгновенной проверки")
+        print("!"*50 + "\n")
+        # Берем только первые 128 молекул
+        ds_train = torch.utils.data.Subset(ds_train, range(min(128, len(ds_train))))
+        ds_test = torch.utils.data.Subset(ds_test, range(min(128, len(ds_test))))
+    
     print(f"Размер выборки (>= {MIN_ATOMS} целевых ядер {SPECT_SET}): Train={len(ds_train)}, Test={len(ds_test)}")
     
     dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
@@ -204,6 +215,10 @@ def train(infile, outfile, seed):
             criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
                                                std_regularize=loss_config['std_regularize'])
             stage_max_epochs = 300
+
+        if args.smoke_test:
+            stage_max_epochs = 2 # Всего 2 эпохи на стадию, чтобы цикл пролетал за секунды
+            
         print("="*60 + "\n")
 
         validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
