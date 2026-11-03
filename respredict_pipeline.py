@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step()
 # === 1. ПАРСИНГ АРГУМЕНТОВ КОМАНДНОЙ СТРОКИ ===
 parser = argparse.ArgumentParser(description="NMR GNN Training Pipeline")
 parser.add_argument("--protocol", type=str, default="auto", 
-                    help="Режим: pretrain, warmup, molcalib, auto. Можно передавать списком через запятую: warmup,molcalib")
+                    help="Режим: pretrain, pretrain_gml, warmup, molcalib, auto. Можно передавать списком через запятую")
 parser.add_argument("--weights", type=str, default="", 
                     help="Путь к файлу предобученных весов (.state)")
 parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
@@ -108,7 +108,6 @@ def params():
     CV_I = args.cv_i
     infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{:d}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
                                                                                               MAT_PROPS, tgt_max_n, CV_I))
-#    seed = 1234                                                                                              
     seed = 4321
     outfile = f"respredict_pipeline_{SPECT_SET}.{seed}.{CV_I}.out"
     yield infile, outfile, seed
@@ -139,8 +138,6 @@ def train(infile, outfile, seed):
     assert len(mu_scale) == len(tgt_nucs)
     assert len(std_scale) == len(tgt_nucs)
     
-
-
     # -----------------------------------------------------
     # Настройка Dataloader (фильтрация по мин. числу атомов)
     # -----------------------------------------------------
@@ -148,14 +145,12 @@ def train(infile, outfile, seed):
     dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
     ds_train, ds_test = graph_conv_many_nuc_util.make_datasets({'filename' : infile}, 
                                                                dataset_hparams, 
-        
                                                                min_atoms=MIN_ATOMS)
     if args.smoke_test:
         print("\n" + "!"*50)
         print("!!! ВКЛЮЧЕН РЕЖИМ SMOKE TEST !!!")
         print("Обрезаем датасет до 1 батча для мгновенной проверки")
         print("!"*50 + "\n")
-        # Берем только первые 128 молекул
         ds_train = torch.utils.data.Subset(ds_train, range(min(128, len(ds_train))))
         ds_test = torch.utils.data.Subset(ds_test, range(min(128, len(ds_test))))
     
@@ -188,11 +183,10 @@ def train(infile, outfile, seed):
     
     # Определяем, какие этапы запускать
     if PROTOCOL == "auto":
-        protocols_to_run = ["pretrain", "warmup", "molcalib"]
+        protocols_to_run = ["pretrain", "pretrain_gml", "warmup", "molcalib"]
     else:
-        # Разбиваем строку по запятой и удаляем пробелы
         protocols_to_run = [p.strip() for p in PROTOCOL.split(',')]
-        valid_protocols = ["pretrain", "warmup", "molcalib"]
+        valid_protocols = ["pretrain", "pretrain_gml", "warmup", "molcalib"]
         for p in protocols_to_run:
             if p not in valid_protocols:
                 raise ValueError(f"Неизвестный этап: '{p}'. Разрешены только: {valid_protocols}")
@@ -202,9 +196,12 @@ def train(infile, outfile, seed):
         opt_params = opt_params_base.copy()
         stage_max_epochs = MAX_EPOCHS
 
-        # По умолчанию все параметры разморожены (для warmup и molcalib)
+        # По умолчанию все параметры разморожены (для warmup, molcalib и pretrain_gml)
         for param in net.parameters():
             param.requires_grad = True
+
+        # Извлекаем оригинальную модель для корректной проверки hasattr при DataParallel
+        base_net = net.module if isinstance(net, torch.nn.DataParallel) else net
 
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
@@ -215,24 +212,38 @@ def train(infile, outfile, seed):
                                                           lambda_penalty=LAMBDA_PENALTY)
 
         elif stage_protocol == 'pretrain':
-            print("=== RUNNING STAGE: PRETRAIN (MSE LOSS ONLY) ===")
+            print("=== RUNNING STAGE: PRETRAIN (MSE LOSS ONLY, FROZEN GML) ===")
 
-            # Замораживаем весь экстрактор (оставляем только финальные слои)
-            for param in net.gml.parameters():
+            # Замораживаем весь экстрактор (оставляем только финальные слои mu)
+            for param in base_net.gml.parameters():
                 param.requires_grad = False
 
-            # Замораживаем голову сигмы, чтобы оптимизатор даже не пытался её трогать
-            if hasattr(net, 'lin_out_std1'):
-                for param in net.lin_out_std1.parameters():
+            # Замораживаем голову сигмы
+            if hasattr(base_net, 'lin_out_std1'):
+                for param in base_net.lin_out_std1.parameters():
                     param.requires_grad = False
-            if hasattr(net, 'lin_out_std2'):
-                for param in net.lin_out_std2.parameters():
+            if hasattr(base_net, 'lin_out_std2'):
+                for param in base_net.lin_out_std2.parameters():
                     param.requires_grad = False
 
-            opt_params['lr'] = 1e-3  # Большой шаг для быстрой настройки голов
+            opt_params['lr'] = 1e-3  
             stage_max_epochs = 1000
+            criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
+
+        elif stage_protocol == 'pretrain_gml':
+            print("=== RUNNING STAGE: PRETRAIN GML (FULL MSE TRAINING, FROZEN SIGMA) ===")
             
-            # ЧИСТЫЙ MSE: передаем ТОЛЬКО mu_scale_t
+            # gml разморожен (сделано в начале цикла requires_grad = True). 
+            # Нам нужно только заморозить сигму!
+            if hasattr(base_net, 'lin_out_std1'):
+                for param in base_net.lin_out_std1.parameters():
+                    param.requires_grad = False
+            if hasattr(base_net, 'lin_out_std2'):
+                for param in base_net.lin_out_std2.parameters():
+                    param.requires_grad = False
+
+            opt_params['lr'] = 1e-4  
+            stage_max_epochs = 1000
             criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
 
         else: # warmup
@@ -243,7 +254,7 @@ def train(infile, outfile, seed):
             stage_max_epochs = 300
 
         if args.smoke_test:
-            stage_max_epochs = 2 # Всего 2 эпохи на стадию, чтобы цикл пролетал за секунды
+            stage_max_epochs = 2 
             
         print("="*60 + "\n")
 
@@ -278,7 +289,7 @@ def train(infile, outfile, seed):
         json.dump(metadata, open(os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".json"), 'w'), indent=4)
         pickle.dump(metadata, open(os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".meta"), 'wb'))
 
-        # Запуск обучения для текущего этапа (встроенная функция EarlyStopping прервет цикл при необходимости)
+        # Запуск обучения для текущего этапа
         graph_conv_many_nuc_util.generic_runner(net, optimizer, scheduler, criterion, 
                                                 dl_train, dl_test, 
                                                 MAX_EPOCHS=stage_max_epochs, 
@@ -286,12 +297,10 @@ def train(infile, outfile, seed):
                                                 validate_func= validate_func, 
                                                 checkpoint_func= checkpoint_func)
                                                 
-        # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
+        # После выхода из generic_runner сохраняем веса
         best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
         best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.model")
 
-        # Если ранее была применена обертка DataParallel для нескольких GPU,
-        # нужно сохранять внутренний модуль (net.module), а не саму обертку.
         if isinstance(net, torch.nn.DataParallel):
             torch.save(net.module.state_dict(), best_state_path)
             torch.save(net.module, best_model_path)
@@ -308,7 +317,6 @@ def train(infile, outfile, seed):
 
 if __name__ == "__main__":
     import glob
-    # Принудительно удаляем старые маркеры выполнения Ruffus перед запуском
     for old_out_file in glob.glob(f"respredict_pipeline_{SPECT_SET}.*.out"):
         try:
             os.remove(old_out_file)
