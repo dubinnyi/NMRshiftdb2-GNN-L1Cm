@@ -166,6 +166,7 @@ def train(infile, outfile, seed):
 
     net = nets.GraphVertModel(**net_params)
 
+
     # === УМНАЯ ИНИЦИАЛИЗАЦИЯ БИАСА (BIAS INITIALIZATION) ===
     if net_params_base.get('force_lin_init', False):
         # 1. Считаем глобальное среднее химического сдвига по train_df
@@ -177,34 +178,27 @@ def train(infile, outfile, seed):
         mean_shift = float(np.mean(all_shifts))
         print(f"Средний химический сдвиг обучающей выборки: {mean_shift:.4f} ppm")
 
-        # 2. Находим финальный слой, предсказывающий mu, и меняем его bias
-        # (Проверяем типичные названия финальных слоев в вашей архитектуре)
-        final_layer = None
-        if hasattr(net, 'lin_out_mu2'):
-            final_layer = net.lin_out_mu2
-        elif hasattr(net, 'lin_out2'):
-            final_layer = net.lin_out2
-        elif hasattr(net, 'lin_out'):
-            final_layer = net.lin_out
+        # 2. Умный поиск финального слоя предсказания mu
+        last_linear_mu = None
+        all_linears = []
+        
+        # Проходим по всем слоям сети
+        for name, module in net.named_modules():
+            # Нам нужны только линейные слои, и мы отсекаем те, что отвечают за std (неопределенность)
+            if isinstance(module, nn.Linear) and 'std' not in name:
+                all_linears.append(module)
+                
+        # Берем самый последний слой из найденных (он и есть выходной слой mu)
+        if all_linears:
+            last_linear_mu = all_linears[-1]
 
-        if final_block is not None:
-            # Ищем все слои nn.Linear внутри этого блока
-            linear_layers = [m for m in final_block.modules() if isinstance(m, nn.Linear)]
-            if linear_layers:
-                # Берем самый последний слой, так как он выдает финальное значение mu
-                last_linear = linear_layers[-1]
-                if last_linear.bias is not None:
-                    # Инициализируем bias средним химическим сдвигом
-                    torch.nn.init.constant_(last_linear.bias, mean_shift)
-                    print(f"Bias финального слоя ({last_linear}) успешно инициализирован значением {mean_shift:.4f}")
-                else:
-                    print("Предупреждение: У последнего линейного слоя отключен bias (bias=False).")
-            else:
-                 print("Предупреждение: Внутри финального блока не найдено слоев nn.Linear.")
+        if last_linear_mu is not None and last_linear_mu.bias is not None:
+            torch.nn.init.constant_(last_linear_mu.bias, mean_shift)
+            print(f"Bias финального слоя успешно инициализирован значением {mean_shift:.4f}")
         else:
-            print("Предупреждение: Финальный блок предсказания не найден.")
-
+            print("Предупреждение: Подходящий линейный слой для инициализации bias не найден или bias отключен.")
     # ========================================================
+
 
     # === 2. ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
     if LOAD_WEIGHTS and os.path.exists(LOAD_WEIGHTS):
