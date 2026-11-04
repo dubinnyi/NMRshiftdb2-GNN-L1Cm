@@ -244,7 +244,7 @@ def train(infile, outfile, seed):
                     param.requires_grad = False
 
             opt_params['lr'] = 1e-4  
-            stage_max_epochs = 1000
+            stage_max_epochs = 10000
             criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
 
         else: # warmup
