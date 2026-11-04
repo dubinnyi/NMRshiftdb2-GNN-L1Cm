@@ -166,6 +166,35 @@ def train(infile, outfile, seed):
 
     net = nets.GraphVertModel(**net_params)
 
+    # === УМНАЯ ИНИЦИАЛИЗАЦИЯ БИАСА (BIAS INITIALIZATION) ===
+    if net_params_base.get('force_lin_init', False):
+        # 1. Считаем глобальное среднее химического сдвига по train_df
+        all_shifts = []
+        for val_list in d['train_df']['value']:
+            shifts_dict = val_list[0]
+            all_shifts.extend(shifts_dict.values())
+        
+        mean_shift = float(np.mean(all_shifts))
+        print(f"Средний химический сдвиг обучающей выборки: {mean_shift:.4f} ppm")
+
+        # 2. Находим финальный слой, предсказывающий mu, и меняем его bias
+        # (Проверяем типичные названия финальных слоев в вашей архитектуре)
+        final_layer = None
+        if hasattr(net, 'lin_out_mu2'):
+            final_layer = net.lin_out_mu2
+        elif hasattr(net, 'lin_out2'):
+            final_layer = net.lin_out2
+        elif hasattr(net, 'lin_out'):
+            final_layer = net.lin_out
+
+        if final_layer is not None and final_layer.bias is not None:
+            # Заполняем вектор смещения средним значением
+            torch.nn.init.constant_(final_layer.bias, mean_shift)
+            print(f"Bias финального слоя успешно инициализирован значением {mean_shift:.4f}")
+        else:
+            print("Предупреждение: Финальный линейный слой не найден, оставлен нулевой bias.")
+    # ========================================================
+
     # === 2. ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
     if LOAD_WEIGHTS and os.path.exists(LOAD_WEIGHTS):
         print(f"Loading pre-trained weights from {LOAD_WEIGHTS}...")
