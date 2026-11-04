@@ -82,19 +82,20 @@ LAMBDA_PENALTY = 1.0  # Вес L1-якоря для c_m
 
 EXP_NAME = f"good_{SPECT_SET}"
 
-net_params_base = {'init_noise' : 1e-4, 
-                   'resnet' : True, 
-                   'int_d' : 2048, 
-                   'layer_n' : 10, 
-                   'GS' : 4, 
-                   'agg_func' : 'mean', 
-                   'force_lin_init' : True, 
-                   'g_feature_n' : -1, 
-                   'resnet_out' : True, 
-                   'out_std' : True, 
-                   'graph_dropout' : 0.0, 
-                   'resnet_d': 128, 
-                   'OUT_DIM' : 1, 
+net_params_base = {
+    'init_noise' : 1e-4, 
+    'resnet' : True, 
+    'int_d' : 512,      # Снижено с 2048
+    'layer_n' : 8,      # Снижено с 10
+    'GS' : 4, 
+    'agg_func' : 'mean', 
+    'force_lin_init' : True, 
+    'g_feature_n' : -1, 
+    'resnet_out' : True, 
+    'out_std' : True, 
+    'graph_dropout' : 0.05, # Легкая регуляризация
+    'resnet_d': 128, 
+    'OUT_DIM' : 1, 
 }
 
 opt_params_base = {'amsgrad' : False, 
@@ -108,7 +109,7 @@ def params():
     CV_I = args.cv_i
     infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
                                                                                               MAT_PROPS, tgt_max_n, CV_I))
-    seed = 4321
+    seed = 9875
     outfile = f"respredict_pipeline_{SPECT_SET}.{seed}.{CV_I}.out"
     yield infile, outfile, seed
 
