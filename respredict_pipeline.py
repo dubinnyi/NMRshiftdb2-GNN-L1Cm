@@ -187,12 +187,23 @@ def train(infile, outfile, seed):
         elif hasattr(net, 'lin_out'):
             final_layer = net.lin_out
 
-        if final_layer is not None and final_layer.bias is not None:
-            # Заполняем вектор смещения средним значением
-            torch.nn.init.constant_(final_layer.bias, mean_shift)
-            print(f"Bias финального слоя успешно инициализирован значением {mean_shift:.4f}")
+        if final_block is not None:
+            # Ищем все слои nn.Linear внутри этого блока
+            linear_layers = [m for m in final_block.modules() if isinstance(m, nn.Linear)]
+            if linear_layers:
+                # Берем самый последний слой, так как он выдает финальное значение mu
+                last_linear = linear_layers[-1]
+                if last_linear.bias is not None:
+                    # Инициализируем bias средним химическим сдвигом
+                    torch.nn.init.constant_(last_linear.bias, mean_shift)
+                    print(f"Bias финального слоя ({last_linear}) успешно инициализирован значением {mean_shift:.4f}")
+                else:
+                    print("Предупреждение: У последнего линейного слоя отключен bias (bias=False).")
+            else:
+                 print("Предупреждение: Внутри финального блока не найдено слоев nn.Linear.")
         else:
-            print("Предупреждение: Финальный линейный слой не найден, оставлен нулевой bias.")
+            print("Предупреждение: Финальный блок предсказания не найден.")
+
     # ========================================================
 
     # === 2. ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
