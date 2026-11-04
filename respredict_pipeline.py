@@ -43,7 +43,7 @@ parser.add_argument("--min_error", type=float, default=None,
                     help="Минимальная ошибка (std_regularize) в ppm. По умолчанию: 13C=0.8, 1H=0.08")
 parser.add_argument("--max_epochs", type=int, default=10000, 
                     help="Максимальное количество эпох на один этап")
-parser.add_argument("--cv_i", type=int, default=0, 
+parser.add_argument("--cv_i", type=str, default='0', 
                     help="Индекс кросс-валидации датасета (0, 1 и т.д.)")
 parser.add_argument("--smoke_test", action="store_true", 
                     help="Быстрый прогон (2 батча, 2 эпохи) для проверки пайплайна на ошибки")
@@ -106,7 +106,7 @@ opt_params_base = {'amsgrad' : False,
 
 def params():
     CV_I = args.cv_i
-    infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{:d}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
+    infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
                                                                                               MAT_PROPS, tgt_max_n, CV_I))
     seed = 4321
     outfile = f"respredict_pipeline_{SPECT_SET}.{seed}.{CV_I}.out"
