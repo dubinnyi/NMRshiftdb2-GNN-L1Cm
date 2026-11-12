@@ -18,7 +18,7 @@ parser.add_argument("--state", type=str, required=True,
                     help="Путь к файлу модели (.model или .state)")
 parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default=None, 
                     help="Целевое ядро (автовывод из meta, если не указано)")
-parser.add_argument("--cv_i", type=int, default=None, 
+parser.add_argument("--cv_i", type=str, default=None, 
                     help="Индекс кросс-валидации (автовывод из meta, если не указано)")
 parser.add_argument("--min_error", type=float, default=None, 
                     help="Минимальная ошибка std_reg (автовывод из meta, если не указано)")
