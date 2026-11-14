@@ -58,7 +58,7 @@ MAX_EPOCHS = args.max_epochs
 if args.min_error is not None:
     STD_REGULARIZE = args.min_error
 else:
-    STD_REGULARIZE = 0.8 if SPECT_SET == '13C' else 0.03
+    STD_REGULARIZE = 0.1 if SPECT_SET == '13C' else 0.01
 
 DATASET_DIR = "graph_conv_many_nuc_pipeline.datasets"
 td = lambda x : os.path.join(DATASET_DIR, x)
@@ -71,10 +71,11 @@ DATASET_NAME = 'nmrshiftdb_hconfspcl_nmrshiftdb'
 if SPECT_SET == '13C':
     NUC_LOSS_SCALE = {'13C' : 1.0} 
     NUC_STD_SCALE = {'13C' : 1.0}
-    STD_REGULARIZE = 0.8
+    STD_REGULARIZE = 0.1
 else:
-    NUC_LOSS_SCALE = {'1H' : 1.0}
-    NUC_STD_SCALE = {'1H' : 1.0} 
+    NUC_LOSS_SCALE = {'1H' : 1.0/20}
+    NUC_STD_SCALE = {'1H' : 10.0} 
+    STD_REGULARIZE = 0.01
 
 tgt_max_n = 64 
 MIN_ATOMS = 5
@@ -85,8 +86,8 @@ EXP_NAME = f"good_{SPECT_SET}"
 net_params_base = {
     'init_noise' : 1e-4, 
     'resnet' : True, 
-    'int_d' : 512,      # Снижено с 2048
-    'layer_n' : 8,      # Снижено с 10
+    'int_d' : 2048,      # Снижено с 2048
+    'layer_n' : 10,      # Снижено с 10
     'GS' : 4, 
     'agg_func' : 'mean', 
     'force_lin_init' : True, 
