@@ -700,56 +700,6 @@ class MaskedMSEScaledLoss(nn.Module):
         return self.mseloss(x_masked, y_masked)
 
 
-class MaskedMSELossForPretrain(nn.Module):
-    """
-    Протокол предварительного обучения: минимизирует MSE для агрессивного и быстрого сдвига mu.
-    """
-    def __init__(self, mu_scale):
-        super().__init__()
-        self.mu_scale = mu_scale
-
-    def __call__(self, pred, y, mask):
-        mu = pred['mu'].float()
-        y = y.float()
-        mask = mask.float()
-
-        mu_scale = self.mu_scale.to(y.device).float()
-
-        y_scaled = y / mu_scale
-        mu_scaled = mu / mu_scale
-
-        # MSE вместо L1 дает экспоненциально более сильный градиент на старте
-        sq_diff = (y_scaled[mask > 0] - mu_scaled[mask > 0])**2
-        
-        return sq_diff.mean()
-
-
-class MaskedL1Loss(nn.Module):
-    """
-    Протокол предварительного обучения: минимизирует только ошибку предсказания (MAE), 
-    игнорируя предсказанную неопределенность (sigma), чтобы избежать паралича градиентов.
-    """
-    def __init__(self, mu_scale):
-        super(MaskedL1Loss, self).__init__()
-        self.mu_scale = mu_scale
-
-    def __call__(self, pred, y, mask):
-        # Принудительно в FP32 для защиты от NaN
-        mu = pred['mu'].float()
-        y = y.float()
-        mask = mask.float()
-
-        mu_scale = self.mu_scale.to(y.device).float()
-
-        y_scaled = y / mu_scale
-        mu_scaled = mu / mu_scale
-
-        # Считаем модуль разницы только для реальных атомов (где mask > 0)
-        abs_diff = torch.abs(y_scaled[mask > 0] - mu_scaled[mask > 0])
-        
-        return abs_diff.mean()
-
-
 class NormUncertainLoss(nn.Module):
     def __init__(self, 
                  mu_scale = torch.Tensor([1.0]), 
@@ -784,7 +734,7 @@ class NormUncertainLoss(nn.Module):
         std_scaled = std / self.std_scale 
 
         y_scaled_masked = y_scaled[mask>0].reshape(-1, 1)
-        u_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
+        mu_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
         std_scaled_masked = std_scaled[mask>0].reshape(-1, 1)
 
         return -log_normal_nolog(y_scaled_masked, 
@@ -794,18 +744,20 @@ class NormUncertainLoss(nn.Module):
 class NormUncertainCalibrationLoss(nn.Module):
     """
     Masked uncertainty loss with per-molecule calibration shift (c_m)
-    and L1 penalty to anchor the absolute scale.
+    and L1 or L2 penalty (in ppm) to anchor the absolute scale.
     """
     def __init__(self, 
                  mu_scale = torch.Tensor([1.0]), 
                  std_scale = torch.Tensor([1.0]), 
                  std_regularize=0.0,
-                 lambda_penalty=1.0):
+                 lambda_penalty=1.0,
+                 cm_norm="L2"):
         super(NormUncertainCalibrationLoss, self).__init__()
         self.mu_scale = mu_scale
         self.std_scale = std_scale
         self.std_regularize = std_regularize
         self.lambda_penalty = lambda_penalty
+        self.cm_norm = cm_norm.upper()
 
     def forward(self, pred, y, mask):
         # === ПРИНУДИТЕЛЬНЫЙ ПЕРЕХОД В FP32 ДЛЯ СТАБИЛЬНОСТИ ===
@@ -824,29 +776,33 @@ class NormUncertainCalibrationLoss(nn.Module):
         std_scaled = std / std_scale
 
         variance = std_scaled ** 2
-        w = mask / variance
+        # Отвязываем дисперсию в весах w, чтобы сеть не манипулировала std ради уменьшения штрафа c_m
+        w = mask / variance.detach()
         delta = y_scaled - mu_scaled
         
         sum_w = w.sum(dim=1, keepdim=True)
         sum_w_clamped = torch.clamp(sum_w, min=1e-9)
         
-        # Weighted shift c_m (Градиенты включены)
+        # Weighted shift c_m в масштабе mu_scale (градиенты по mu включены)
         c_m = (delta * w).sum(dim=1, keepdim=True) / sum_w_clamped
         c_m = c_m * (sum_w > 0).float()
         
-        # МАГИЯ ЗДЕСЬ: Для расчета NLL используем ОТВЯЗАННЫЙ c_m
-        # Сеть больше не сможет манипулировать сигмой, чтобы обнулить NLL 
+        # Для расчета NLL используем отвязанный c_m
         mu_calib = mu_scaled + c_m.detach()
         
-        # Element-wise NLL with calibrated mu
-        element_wise = - (y_scaled - mu_calib)**2 / (2 * variance) - torch.log(std_scaled)
+        # Element-wise NLL (без логарифма, в соответствии с авторским log_normal_nolog)
+        element_wise = - (y_scaled - mu_calib)**2 / (2 * variance) - std_scaled
         
         log_pdf = element_wise * mask
         nll_loss = -log_pdf.sum() / torch.clamp(mask.sum(), min=1.0)
         
-        # L1 Penalty on absolute c_m for global anchor
+        # Переводим c_m обратно в физические единицы (ppm) для прозрачной L1/L2 регуляризации
+        c_m_ppm = c_m * mu_scale
         active_mols = (sum_w > 0).float()
-        c_m_penalty = c_m.abs().sum() / torch.clamp(active_mols.sum(), min=1.0)
+        if self.cm_norm == "L1":
+            c_m_penalty = c_m_ppm.abs().sum() / torch.clamp(active_mols.sum(), min=1.0)
+        else:
+            c_m_penalty = (c_m_ppm ** 2).sum() / torch.clamp(active_mols.sum(), min=1.0)
         
         total_loss = nll_loss + self.lambda_penalty * c_m_penalty
         

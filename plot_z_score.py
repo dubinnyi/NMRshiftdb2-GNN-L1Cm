@@ -22,7 +22,7 @@ parser.add_argument("--cv_i", type=int, default=None,
                     help="Индекс кросс-валидации (автовывод из meta, если не указано)")
 parser.add_argument("--min_error", type=float, default=None, 
                     help="Минимальная ошибка std_reg (автовывод из meta, если не указано)")
-parser.add_argument("--protocol", type=str, choices=["pretrain", "warmup", "molcalib"], default=None, 
+parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default=None, 
                     help="Режим модели (автовывод из meta, если не указано)")
 parser.add_argument("--out", type=str, default="", 
                     help="Явный путь к выходному графику Z-score")
