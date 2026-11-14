@@ -1,102 +1,113 @@
-import sys
-import pandas as pd
 import numpy as np
 import pickle
-import os
-from glob import glob
-import json 
-import time
-import argparse
-
+import pandas as pd
 from ruffus import * 
 from tqdm import  tqdm
 from rdkit import Chem
+import pickle
+import os
+
+from glob import glob
+import json 
+
+import time
+import util
+import nets
+
 from rdkit.Chem import AllChem
 from rdkit.Chem import rdMolDescriptors as rdMD
 
 import torch
 from torch import nn
 from tensorboardX import SummaryWriter
-from torch.utils.data import DataLoader
-import warnings
 
-import util
-import nets
+from tqdm import  tqdm
 from netdataio import * 
 import netdataio
 import itertools
 import graph_conv_many_nuc_util
 from graph_conv_many_nuc_util import move
 
-# Ignore PyTorch warning about lr_scheduler
-warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step()` before `optimizer.step()`")
-
-# === 1. ПАРСИНГ АРГУМЕНТОВ КОМАНДНОЙ СТРОКИ ===
-parser = argparse.ArgumentParser(description="NMR GNN Training Pipeline")
-parser.add_argument("--protocol", type=str, default="auto", 
-                    help="Режим: pretrain, pretrain_gml, warmup, molcalib, auto. Можно передавать списком через запятую")
-parser.add_argument("--weights", type=str, default="", 
-                    help="Путь к файлу предобученных весов (.state)")
-parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
-                    help="Целевое ядро для предсказаний")
-parser.add_argument("--min_error", type=float, default=None, 
-                    help="Минимальная ошибка (std_regularize) в ppm. По умолчанию: 13C=0.8, 1H=0.08")
-parser.add_argument("--max_epochs", type=int, default=10000, 
-                    help="Максимальное количество эпох на один этап")
-parser.add_argument("--cv_i", type=str, default='0', 
-                    help="Индекс кросс-валидации датасета (0, 1 и т.д.)")
-parser.add_argument("--smoke_test", action="store_true", 
-                    help="Быстрый прогон (2 батча, 2 эпохи) для проверки пайплайна на ошибки")
-args, unknown = parser.parse_known_args()
-
-SPECT_SET = args.nucleus
-PROTOCOL = args.protocol
-LOAD_WEIGHTS = args.weights
-MAX_EPOCHS = args.max_epochs
-
-# Настройка регулярзиатора (минимальной ошибки)
-if args.min_error is not None:
-    STD_REGULARIZE = args.min_error
-else:
-    STD_REGULARIZE = 0.1 if SPECT_SET == '13C' else 0.01
-
 DATASET_DIR = "graph_conv_many_nuc_pipeline.datasets"
+
 td = lambda x : os.path.join(DATASET_DIR, x)
 
+
+SPECT_SET = '1H' # or '13C'
+
 TENSORBOARD_DIR = f"logs.{SPECT_SET}"
-CHECKPOINT_DIR = "checkpoints"+"_"+SPECT_SET
+
+CHECKPOINT_DIR = "checkpoints" 
 MAT_PROPS= 'aromatic'
 DATASET_NAME = 'nmrshiftdb_hconfspcl_nmrshiftdb'
+#DATASET_NAME = 'qm9'
 
 if SPECT_SET == '13C':
     NUC_LOSS_SCALE = {'13C' : 1.0} 
-    NUC_STD_SCALE = {'13C' : 1.0}
+    NUC_STD_SCALE = {'13C' : 1.0} 
     STD_REGULARIZE = 0.1
 else:
-    NUC_LOSS_SCALE = {'1H' : 1.0/20}
+    NUC_LOSS_SCALE = {'1H' : 1.0/20.0}
     NUC_STD_SCALE = {'1H' : 10.0} 
     STD_REGULARIZE = 0.01
 
 tgt_max_n = 64 
-MIN_ATOMS = 5
-LAMBDA_PENALTY = 1.0  # Вес L1-якоря для c_m
+MAX_EPOCHS = 10000
 
 EXP_NAME = f"good_{SPECT_SET}"
 
-net_params_base = {
-    'init_noise' : 1e-4, 
-    'resnet' : True, 
-    'int_d' : 2048,      # Снижено с 2048
-    'layer_n' : 10,      # Снижено с 10
-    'GS' : 4, 
-    'agg_func' : 'mean', 
-    'force_lin_init' : True, 
-    'g_feature_n' : -1, 
-    'resnet_out' : True, 
-    'out_std' : True, 
-    'graph_dropout' : 0.05, # Легкая регуляризация
-    'resnet_d': 128, 
-    'OUT_DIM' : 1, 
+
+def create_validate_func(tgt_nucs):
+    def val_func(res): # val, mask, truth):
+        val = res['pred_val']
+        mask = res['pred_mask']
+        truth = res['pred_truth']
+        res = {}
+        for ni, n in enumerate(tgt_nucs):
+            delta = (val[:, :, ni] - truth[:, :, ni])[mask[:, :, ni] > 0].flatten()
+            res[f"{n}/test_std_err"] = np.std(delta)
+            res[f"{n}/test_max_error"] = np.max(np.abs(delta))
+            res[f"{n}/test_mean_abs_err"] = np.mean(np.abs(delta))
+            res[f"{n}/test_abs_err_90"] = np.percentile(np.abs(delta), 90)
+        return res
+    return val_func
+
+def create_uncertain_validate_func(tgt_nucs):
+    def val_func(res): # val, mask, truth):
+        mu = res['pred_mu']
+        std = res['pred_std'] 
+        mask = res['pred_mask']
+        truth = res['pred_truth']
+        res = {}
+        for ni, n in enumerate(tgt_nucs):
+            delta = (mu[:, :, ni] - truth[:, :, ni])[mask[:, :, ni] > 0].flatten()
+            masked_std = (std[:, :, ni])[mask[:, :, ni] > 0].flatten()
+            res[f"{n}/test_std_err"] = np.std(delta)
+            res[f"{n}/test_max_error"] = np.max(np.abs(delta))
+            res[f"{n}/test_mean_abs_err"] = np.mean(np.abs(delta))
+            res[f"{n}/test_abs_err_90"] = np.percentile(np.abs(delta), 90)
+            res[f"{n}/std/mean"] = np.mean(masked_std)
+            res[f"{n}/std/min"] = np.min(masked_std)
+            res[f"{n}/std/max"] = np.max(masked_std)
+
+        return res
+    return val_func
+
+
+
+net_params_base = {'init_noise' : 1e-2, 
+                   'resnet' : True, 
+                   'int_d' : 2048, 
+                   'layer_n' : 10, 
+                   'GS' : 4, 
+                   'agg_func' : 'goodmax', 
+                   'force_lin_init' : True, 
+                   'g_feature_n' : -1, 
+                   'resnet_out' : True, 
+                   'out_std' : True, 
+                   'graph_dropout' : 0.0, 
+                   'resnet_d': 128, 
+                   'OUT_DIM' : 1, # update
 }
 
 opt_params_base = {'amsgrad' : False, 
@@ -106,12 +117,19 @@ opt_params_base = {'amsgrad' : False,
                    'eps' : 1e-8, 
                    'scheduler_step_size' : 10}
 
+
+
 def params():
-    CV_I = args.cv_i
-    infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
+    CV_I = int(os.environ.get("CV_I", 0))
+    infile = td('graph_conv_many_nuc_pipeline.data.{}.{}.{}.{:d}.{:d}.mol_dict.pickle'.format(SPECT_SET, DATASET_NAME, 
                                                                                               MAT_PROPS, tgt_max_n, CV_I))
-    seed = 9875
+    
+    seed = 1234                                                                                              
+
     outfile = f"respredict_pipeline_{SPECT_SET}.{seed}.{CV_I}.out"
+    
+
+
     yield infile, outfile, seed
 
 @mkdir(CHECKPOINT_DIR)
@@ -121,6 +139,7 @@ def train(infile, outfile, seed):
     np.random.seed(seed)
 
     d = pickle.load(open(infile, 'rb'))
+
     tgt_nucs = d['tgt_nucs']
     MAX_N = d['MAX_N']
     print("TGT_NUCS=", tgt_nucs)
@@ -136,215 +155,95 @@ def train(infile, outfile, seed):
         for k, v in NUC_STD_SCALE.items():
             if k in tn:
                 std_scale.append(v)
-                
     assert len(mu_scale) == len(tgt_nucs)
     assert len(std_scale) == len(tgt_nucs)
-    
-    # -----------------------------------------------------
-    # Настройка Dataloader (фильтрация по мин. числу атомов)
-    # -----------------------------------------------------
-    BATCH_SIZE = 128
+    print("NUC_LOSS_SCALE=", NUC_LOSS_SCALE)
+    print("mu_scale=", mu_scale)
+    print("std_scale=", std_scale)
+    print("tgt_nucs=", tgt_nucs)
+
+    ### Create datasets and data loaders
+
+    BATCH_SIZE = 16
+
     dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
+
     ds_train, ds_test = graph_conv_many_nuc_util.make_datasets({'filename' : infile}, 
-                                                               dataset_hparams, 
-                                                               min_atoms=MIN_ATOMS)
-    if args.smoke_test:
-        print("\n" + "!"*50)
-        print("!!! ВКЛЮЧЕН РЕЖИМ SMOKE TEST !!!")
-        print("Обрезаем датасет до 1 батча для мгновенной проверки")
-        print("!"*50 + "\n")
-        ds_train = torch.utils.data.Subset(ds_train, range(min(128, len(ds_train))))
-        ds_test = torch.utils.data.Subset(ds_test, range(min(128, len(ds_test))))
-    
-    print(f"Размер выборки (>= {MIN_ATOMS} целевых ядер {SPECT_SET}): Train={len(ds_train)}, Test={len(ds_test)}")
-    
-    dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
-    dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
+                                                               dataset_hparams)
+                                                               
+    dl_train = torch.utils.data.DataLoader(ds_train, batch_size=BATCH_SIZE, 
+                                           shuffle=True,pin_memory=True)
+    dl_test = torch.utils.data.DataLoader(ds_test, batch_size=BATCH_SIZE, 
+                                          shuffle=True,pin_memory=True)
 
     net_params = net_params_base.copy()
+    opt_params = opt_params_base.copy()
+
     net_params['g_feature_n'] = ds_test[0][1].shape[-1]
     net_params['OUT_DIM'] =  len(tgt_nucs)
 
+    use_std = True 
+                  
     net = nets.GraphVertModel(**net_params)
-
-
-    # === УМНАЯ ИНИЦИАЛИЗАЦИЯ БИАСА (BIAS INITIALIZATION) ===
-    if net_params_base.get('force_lin_init', False):
-        # 1. Считаем глобальное среднее химического сдвига по train_df
-        all_shifts = []
-        for val_list in d['train_df']['value']:
-            shifts_dict = val_list[0]
-            all_shifts.extend(shifts_dict.values())
-        
-        mean_shift = float(np.mean(all_shifts))
-        print(f"Средний химический сдвиг обучающей выборки: {mean_shift:.4f} ppm")
-
-        # 2. Умный поиск финального слоя предсказания mu
-        last_linear_mu = None
-        all_linears = []
-        
-        # Проходим по всем слоям сети
-        for name, module in net.named_modules():
-            # Нам нужны только линейные слои, и мы отсекаем те, что отвечают за std (неопределенность)
-            if isinstance(module, nn.Linear) and 'std' not in name:
-                all_linears.append(module)
-                
-        # Берем самый последний слой из найденных (он и есть выходной слой mu)
-        if all_linears:
-            last_linear_mu = all_linears[-1]
-
-        if last_linear_mu is not None and last_linear_mu.bias is not None:
-            torch.nn.init.constant_(last_linear_mu.bias, mean_shift)
-            print(f"Bias финального слоя успешно инициализирован значением {mean_shift:.4f}")
-        else:
-            print("Предупреждение: Подходящий линейный слой для инициализации bias не найден или bias отключен.")
-    # ========================================================
-
-
-    # === 2. ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
-    if LOAD_WEIGHTS and os.path.exists(LOAD_WEIGHTS):
-        print(f"Loading pre-trained weights from {LOAD_WEIGHTS}...")
-        net.load_state_dict(torch.load(LOAD_WEIGHTS, weights_only=True))
-    elif LOAD_WEIGHTS:
-        print(f"WARNING: Checkpoint {LOAD_WEIGHTS} not found!")
-
+ 
     net = move(net, USE_CUDA)
 
+    for n, p in net.named_parameters():
+        print(n, p.shape)
     loss_config = {'std_regularize' : STD_REGULARIZE, 
                    'mu_scale' : mu_scale, 
                    'std_scale' : std_scale}
 
-    mu_scale_t = move(torch.Tensor(loss_config['mu_scale']), USE_CUDA)
-    std_scale_t = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
-    
-    # Определяем, какие этапы запускать
-    if PROTOCOL == "auto":
-        protocols_to_run = ["pretrain", "pretrain_gml", "warmup", "molcalib"]
+    if use_std:
+        std_regularize = loss_config['std_regularize']
+        mu_scale = move(torch.Tensor(loss_config['mu_scale']), USE_CUDA)
+        std_scale = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
+        criterion = nets.NormUncertainLoss(mu_scale, 
+                                           std_scale,
+                                           std_regularize = loss_config['std_regularize'])
     else:
-        protocols_to_run = [p.strip() for p in PROTOCOL.split(',')]
-        valid_protocols = ["pretrain", "pretrain_gml", "warmup", "molcalib"]
-        for p in protocols_to_run:
-            if p not in valid_protocols:
-                raise ValueError(f"Неизвестный этап: '{p}'. Разрешены только: {valid_protocols}")
+        criterion = nets.MaskedMSELoss()
 
-    # === 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК ЭТАПОВ ===
-    for stage_protocol in protocols_to_run:
-        opt_params = opt_params_base.copy()
-        stage_max_epochs = MAX_EPOCHS
+    validate_func = create_uncertain_validate_func(tgt_nucs)
 
-        # По умолчанию все параметры разморожены (для warmup, molcalib и pretrain_gml)
-        for param in net.parameters():
-            param.requires_grad = True
+    optimizer = torch.optim.Adam(net.parameters(), lr=opt_params['lr'], 
+                                 amsgrad=opt_params['amsgrad'], 
+                                 eps=opt_params['eps'], 
+                                 weight_decay=opt_params['weight_decay'])
 
-        # Извлекаем оригинальную модель для корректной проверки hasattr при DataParallel
-        base_net = net.module if isinstance(net, torch.nn.DataParallel) else net
+    
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 
+                                                step_size=opt_params['scheduler_step_size'], 
+                                                gamma=opt_params['scheduler_gamma'])
 
-        print("\n" + "="*60)
-        if stage_protocol == 'molcalib':
-            print("=== RUNNING STAGE: MOLCALIB (FINE-TUNING) ===")
-            opt_params['lr'] = 1e-5
-            criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
-                                                          std_regularize=loss_config['std_regularize'],
-                                                          lambda_penalty=LAMBDA_PENALTY)
+    MODEL_NAME = "{}.{:08d}".format(EXP_NAME,int(time.time() % 1e8))
+    
+    checkpoint_filename = os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".{epoch_i:08d}")
+    print("checkpoint:", checkpoint_filename)
+    checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(10, checkpoint_filename)
+                        
+    writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, MODEL_NAME))
 
-        elif stage_protocol == 'pretrain':
-            print("=== RUNNING STAGE: PRETRAIN (MSE LOSS ONLY, FROZEN GML) ===")
+    metadata = {'dataset_hparams' : dataset_hparams, 
+                'net_params' : net_params, 
+                'opt_params' : opt_params, 
+                'infile' : infile, 
+                'tgt_nucs' : tgt_nucs, 
+                'max_n' : MAX_N,
+                'loss_params' : loss_config}
 
-            # Замораживаем весь экстрактор (оставляем только финальные слои mu)
-            for param in base_net.gml.parameters():
-                param.requires_grad = False
+    json.dump(metadata, open(os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".json"), 'w'), 
+              indent=4)
+    print(json.dumps(metadata, indent=4))
+    pickle.dump(metadata, 
+                open(os.path.join(CHECKPOINT_DIR, MODEL_NAME + ".meta"), 'wb'))
 
-            # Замораживаем голову сигмы
-            if hasattr(base_net, 'lin_out_std1'):
-                for param in base_net.lin_out_std1.parameters():
-                    param.requires_grad = False
-            if hasattr(base_net, 'lin_out_std2'):
-                for param in base_net.lin_out_std2.parameters():
-                    param.requires_grad = False
-
-            opt_params['lr'] = 1e-3  
-            stage_max_epochs = 1000
-            criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
-
-        elif stage_protocol == 'pretrain_gml':
-            print("=== RUNNING STAGE: PRETRAIN GML (FULL MSE TRAINING, FROZEN SIGMA) ===")
-            
-            # gml разморожен (сделано в начале цикла requires_grad = True). 
-            # Нам нужно только заморозить сигму!
-            if hasattr(base_net, 'lin_out_std1'):
-                for param in base_net.lin_out_std1.parameters():
-                    param.requires_grad = False
-            if hasattr(base_net, 'lin_out_std2'):
-                for param in base_net.lin_out_std2.parameters():
-                    param.requires_grad = False
-
-            opt_params['lr'] = 1e-4  
-            stage_max_epochs = 10000
-            criterion = nets.MaskedMSELossForPretrain(mu_scale_t)
-
-        else: # warmup
-            print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
-            opt_params['lr'] = 1e-4
-            criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
-                                               std_regularize=loss_config['std_regularize'])
-            stage_max_epochs = 300
-
-        if args.smoke_test:
-            stage_max_epochs = 2 
-            
-        print("="*60 + "\n")
-
-        validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
-
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), 
-                                     lr=opt_params['lr'], 
-                                     amsgrad=opt_params['amsgrad'], 
-                                     eps=opt_params['eps'], 
-                                     weight_decay=opt_params['weight_decay'])
-        
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 
-                                                    step_size=opt_params['scheduler_step_size'], 
-                                                    gamma=opt_params['scheduler_gamma'])
-
-        STAGE_MODEL_NAME = "{}_{}.{:08d}".format(EXP_NAME, stage_protocol, int(time.time() % 1e8))
-        checkpoint_filename = os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".{epoch_i:08d}")
-        print("Checkpoint template:", checkpoint_filename)
-        checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
-                            
-        writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
-
-        metadata = {'dataset_hparams' : dataset_hparams, 
-                    'net_params' : net_params, 
-                    'opt_params' : opt_params, 
-                    'infile' : infile, 
-                    'tgt_nucs' : tgt_nucs, 
-                    'max_n' : MAX_N,
-                    'loss_params' : loss_config,
-                    'stage': stage_protocol}
-
-        json.dump(metadata, open(os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".json"), 'w'), indent=4)
-        pickle.dump(metadata, open(os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".meta"), 'wb'))
-
-        # Запуск обучения для текущего этапа
-        graph_conv_many_nuc_util.generic_runner(net, optimizer, scheduler, criterion, 
-                                                dl_train, dl_test, 
-                                                MAX_EPOCHS=stage_max_epochs, 
-                                                USE_CUDA=USE_CUDA, writer=writer, 
-                                                validate_func= validate_func, 
-                                                checkpoint_func= checkpoint_func)
-                                                
-        # После выхода из generic_runner сохраняем веса
-        best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
-        best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.model")
-
-        if isinstance(net, torch.nn.DataParallel):
-            torch.save(net.module.state_dict(), best_state_path)
-            torch.save(net.module, best_model_path)
-        else:
-            torch.save(net.state_dict(), best_state_path)
-            torch.save(net, best_model_path)
-        print(f"Финальные веса этапа {stage_protocol} сохранены :\n  {best_state_path}\n  {best_model_path}")
-        # --------------------------
+    graph_conv_many_nuc_util.generic_runner(net, optimizer, scheduler, criterion, 
+                                            dl_train, dl_test, 
+                                            MAX_EPOCHS=MAX_EPOCHS, 
+                                            USE_CUDA=USE_CUDA, writer=writer, 
+                                            validate_func= validate_func, 
+                                            checkpoint_func= checkpoint_func)
 
     pickle.dump({'net_params' : net_params, 
                  'opt_params' : opt_params, 
@@ -352,11 +251,6 @@ def train(infile, outfile, seed):
                 open(outfile, 'wb'))
 
 if __name__ == "__main__":
-    import glob
-    for old_out_file in glob.glob(f"respredict_pipeline_{SPECT_SET}.*.out"):
-        try:
-            os.remove(old_out_file)
-        except OSError:
-            pass
-            
     pipeline_run([train])
+
+

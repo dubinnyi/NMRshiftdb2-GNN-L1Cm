@@ -11,44 +11,68 @@ from tqdm import tqdm
 import time
 import numpy as np
 import pandas as pd
-
 class ModelTrial():
     def __init__(self, training_loader, 
                  validation_loader, hparams):
         self.learning_rate = hparams['learning_rate']
         self.my_batch_size = hparams['batch_size']
 
+        # something
+
+
     def batch_size(self):
         return self.my_batch_size
     
     def build_model(self, hparams):
+        """
+        Return the model 
+        """
         net = nets.GraphVertExtraLinModel( g_feature_n,[INT_D] * LAYER_N, resnet=USE_RESNET, 
                                            noise=INIT_NOISE, agg_func=AGG_FUNC, GS=GS, 
                                            OUT_DIM = len(tgt_nucs))
+        #data_feat = ['vect']
+
         
+
+
     def optimizer(self, model):
+        """
+        return the optimizer
+        """
+        
         return torch.optim.Adam(model.parameters(),
                                 lr=self.learning_rate)
     def loss(self):
-        pass
+        """
+        Return a loss function that takes in two tensors
+        """
+
         
     def training_metrics(self):
+        """
+        """
         return {
             'classification_Error' : function, 
             'nll_loss' : torch.nn.functional.nll_loss
+        
         }
 
     def validation_metrics(self):
-        pass
+        """
+        """
+        
 
 default_atomicno = [1, 6, 7, 8, 9, 15, 16, 17]
+
+### Create datasets and data loaders
 
 default_feat_vect_args = dict(feat_atomicno_onehot=default_atomicno, 
                               feat_pos=False, feat_atomicno=True,
                               feat_valence=True, aromatic=True, hybridization=True, 
-                              partial_charge=False, formal_charge=True,  
+                              partial_charge=False, formal_charge=True,  # WE SHOULD REALLY USE THIS 
                               r_covalent=False,
                               total_valence_onehot=True, 
+                              
                               r_vanderwals=False, default_valence=True, rings=True)
 
 default_feat_mat_args = dict(feat_distances = False, 
@@ -71,25 +95,28 @@ def dict_combine(d1, d2):
     return d1
 
 
-def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
+def make_datasets(exp_config, hparams, train_sample=0):
+    """
+    """
+
+
     d = pickle.load(open(exp_config['filename'], 'rb'))
     train_df = d['train_df']
-    test_df = d['test_df'] 
-    
-    if min_atoms > 0:
-        # Считаем именно количество реальных целевых ядер (1H) в словаре спектра
-        train_df = train_df[train_df.value.map(lambda x: len(x[0]) >= min_atoms)]
-        test_df = test_df[test_df.value.map(lambda x: len(x[0]) >= min_atoms)]
-
     if train_sample > 0:
         print("WARNING, subsampling training data to ", train_sample)
-        train_df = train_df.sample(train_sample, random_state=0)
+        train_df = train_df.sample(train_sample, random_state=0) 
 
     tgt_nucs = d['tgt_nucs']
+    test_df = d['test_df'] #.sample(10000, random_state=10)
+
     MAX_N = d['MAX_N']
+
     datasets = {}
 
-    for phase, df in [('train', train_df), ('test', test_df)]:
+    for phase, df in [('train', train_df), 
+                      ('test', test_df)]:
+                       
+
         ds = netdataio.MoleculeDatasetMulti(df.rdmol.tolist(), 
                                             df.value.tolist(),  
                                             MAX_N, len(tgt_nucs), 
@@ -97,6 +124,8 @@ def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
                                             hparams['feat_mat_args'], 
                                             hparams['adj_args'])        
         datasets[phase] = ds
+
+        
 
     return datasets['train'], datasets['test']
 
@@ -116,27 +145,27 @@ def create_checkpoint_func(every_n, filename_str):
 def run_epoch(net, optimizer, criterion, dl, 
                pred_only = False, USE_CUDA=True,
                return_pred = False, desc="train", 
-              print_shapes=False, progress_bar=True,
-              scaler=None):
+              print_shapes=False, progress_bar=True):
     t1_total= time.time()
 
     accum_pred = []
     running_loss = 0.0
-    running_nll = 0.0
-    running_penalty = 0.0
     total_points = 0
     total_compute_time = 0.0
-    
     if progress_bar:
-        iterator = tqdm(enumerate(dl), total=len(dl), desc=desc)
+        iterator =  tqdm(enumerate(dl), total=len(dl), desc=desc)
     else:
         iterator = enumerate(dl)
 
-    for i_batch, (adj, vect_feat, mat_feat, vals, mask) in iterator:
+    for i_batch, (adj, vect_feat, mat_feat, vals, mask) in \
+            iterator:
         t1 = time.time()
         if print_shapes:
-            print("adj.shape=", adj.shape, "vect_feat.shape=", vect_feat.shape, 
-                  "mat_feat.shape=", mat_feat.shape, "vals.shape=", vals.shape, "mask.shape=", mask.shape)
+            print("adj.shape=", adj.shape, 
+                  "vect_feat.shape=", vect_feat.shape, 
+                  "mat_feat.shape=", mat_feat.shape, 
+                  "vals.shape=", vals.shape, 
+                  "mask.shape=", mask.shape)
 
         if not pred_only:
             optimizer.zero_grad()
@@ -147,77 +176,55 @@ def run_epoch(net, optimizer, criterion, dl,
         mask_t = move(mask, USE_CUDA)
         vals_t = move(vals, USE_CUDA)
 
-        # === ВКЛЮЧАЕМ AMP (FP16) ДЛЯ ФОРВАРДА И LOSS ===
-        with torch.amp.autocast('cuda', enabled=USE_CUDA):
-            res = net((adj_t, vect_feat_t))
 
-            if return_pred:
-                accum_pred_val = {}
-                if isinstance(res, dict):
-                    for k, v in res.items():
-                        accum_pred_val[k] = res[k].cpu().detach().numpy()
-                else:
-                    accum_pred_val['res'] = res.cpu().detach().numpy()
-                accum_pred_val['mask'] = mask.cpu().detach().numpy()
-                accum_pred_val['truth'] = vals.cpu().detach().numpy()
+        res = net((adj_t, vect_feat_t)) # , mat_feat_t))
 
-                accum_pred.append(accum_pred_val)
 
-            if criterion is None:
-                loss = 0.0
-                nll = 0.0
-                penalty = 0.0
+        if return_pred:
+            accum_pred_val = {}
+            if isinstance(res, dict):
+                for k, v in res.items():
+                    accum_pred_val[k] = res[k].cpu().detach().numpy()
             else:
-                loss_out = criterion(res, vals_t, mask_t)
-                if isinstance(loss_out, tuple):
-                    loss, nll, penalty = loss_out
-                else:
-                    loss = loss_out
-                    nll = loss_out
-                    penalty = torch.tensor(0.0, device=loss.device)
-        # === КОНЕЦ БЛОКА AUTOCAST ===
+                accum_pred_val['res'] = res.cpu().detach().numpy()
+            accum_pred_val['mask'] = mask.cpu().detach().numpy()
+            accum_pred_val['truth'] = vals.cpu().detach().numpy()
 
-        # === ОБРАТНОЕ РАСПРОСТРАНЕНИЕ ЧЕРЕЗ SCALER ===
+            accum_pred.append(accum_pred_val)
+
+        if criterion is None:
+            loss = 0.0
+        else:
+            loss = criterion(res, vals_t, mask_t)
+
         if not pred_only:
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
+            loss.backward()
+            optimizer.step()
 
         obs_points = mask.sum()
         if criterion is not None:
             running_loss += loss.item() * obs_points
-            running_nll += nll.item() * obs_points
-            running_penalty += penalty.item() * obs_points
-        total_points += obs_points
+        total_points +=  obs_points
+
 
         t2 = time.time()
         total_compute_time += (t2-t1)
-        
+        #ksjndask
     t2_total = time.time()
     
+
+
     res =  {'timing' : 0.0, 
             'running_loss' : running_loss, 
-            'running_nll' : running_nll,
-            'running_penalty' : running_penalty,
             'total_points' : total_points, 
             'time' : t2_total-t1_total, 
             'compute_time' : total_compute_time, 
             }
-
     if return_pred:
-        if len(accum_pred) > 0:
-            keys = accum_pred[0].keys()
-            for k in keys:
-                accum_pred_v = np.vstack([a[k] for a in accum_pred])
-                res[f'pred_{k}'] = accum_pred_v
-        else:
-            # Защита от пустого датасета
-            for k in ['mu', 'std', 'mask', 'truth', 'res']: 
-                res[f'pred_{k}'] = np.array([])
+        keys = accum_pred[0].keys()
+        for k in keys:
+            accum_pred_v = np.vstack([a[k] for a in accum_pred])
+            res[f'pred_{k}'] = accum_pred_v
             
     return res
 
@@ -229,62 +236,41 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    writer=None, validate_func = None, 
                    checkpoint_func = None):
 
-    # === ИНИЦИАЛИЗАЦИЯ GradScaler ===
-    scaler = torch.amp.GradScaler('cuda', enabled=USE_CUDA)
 
-    # === ИНИЦИАЛИЗАЦИЯ РАННЕЙ ОСТАНОВКИ ===
-    # patience=20 означает 20 проверок подряд (т.е. 100 эпох, так как проверка каждые 5 эпох)
-    early_stopping = EarlyStopping(patience=20, min_delta=1e-4)
+    # loss_scale = torch.Tensor(loss_scale)
+    # std_scale = torch.Tensor(std_scale)
 
 
     for epoch_i in tqdm(range(MAX_EPOCHS)):
+        if scheduler is not None:
+            scheduler.step()
 
+        running_loss = 0.0
+        total_compute_time = 0.0
         t1_total = time.time()
 
         net.train()
         train_res = run_epoch(net, optimizer, criterion, dl_train, 
-                               pred_only = False, USE_CUDA=USE_CUDA, desc='train',
-                               scaler=scaler)
+                               pred_only = False, USE_CUDA=USE_CUDA, desc='train')
 
-        train_loss = train_res['running_loss'] / train_res['total_points']
-        print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")
-
+        # print("{} {:3.3f} compute={:3.1f}s total={:3.1f}s".format(epoch_i, 
+        #                                                           running_loss/total_points, 
+        #                                                          total_compute_time, t2_total-t1_total))
         if writer is not None:
-            writer.add_scalar("train_loss_total", train_res['running_loss']/train_res['total_points'], epoch_i)
-            writer.add_scalar("train_loss_nll", train_res['running_nll']/train_res['total_points'], epoch_i)
-            writer.add_scalar("train_c_m_sq_penalty", train_res['running_penalty']/train_res['total_points'], epoch_i)
+            writer.add_scalar("train_loss", train_res['running_loss']/train_res['total_points'], 
+                              epoch_i)
 
         if epoch_i % 5 == 0:
             net.eval()
-            with torch.no_grad():
-                test_res = run_epoch(net, optimizer, criterion, dl_test, 
+            test_res = run_epoch(net, optimizer, criterion, dl_test, 
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
-
-
-            # --- ЛОГИКА РАННЕЙ ОСТАНОВКИ ---
-            test_loss = test_res['running_loss'] / test_res['total_points']
-            early_stopping(test_loss, net)  # <--- ПЕРЕДАЕМ NET
-        
             for metric_name, metric_val in validate_func(test_res).items():
                 writer.add_scalar(metric_name, metric_val, epoch_i)
             
+            
         if checkpoint_func is not None:
             checkpoint_func(epoch_i = epoch_i, net =net, optimizer=optimizer)
-
-        if scheduler is not None:
-            scheduler.step()
-
-        # Проверка флага ранней остановки в конце эпохи
-        if early_stopping.early_stop:
-            print(f"\n--- ОБУЧЕНИЕ ОСТАНОВЛЕНО ДОСРОЧНО на эпохе {epoch_i} ---")
-            print(f"Валидационный Loss не улучшался последние {early_stopping.patience * 5} эпох.")
-            break
-            
-    # === ВОССТАНОВЛЕНИЕ ЛУЧШИХ ВЕСОВ В КОНЦЕ ЦИКЛА ===
-    if early_stopping.best_state is not None:
-        print(f"Восстановление лучших весов модели (Loss: {early_stopping.best_loss:.4f}) перед завершением этапа.")
-        net.load_state_dict(early_stopping.best_state)
 
 
 def move(tensor, cuda=False):
@@ -299,18 +285,20 @@ def move(tensor, cuda=False):
 
 class PredModel(object):
     def __init__(self, meta_filename, checkpoint_filename, USE_CUDA=False):
+
         meta = pickle.load(open(meta_filename, 'rb'))
+
+
         self.meta = meta 
+
+
         self.USE_CUDA = USE_CUDA
 
         if self. USE_CUDA:
-            net = torch.load(checkpoint_filename, weights_only=False)
-            if isinstance(net, torch.nn.Module):
-                net = net.cuda()
+            net = torch.load(checkpoint_filename)
         else:
             net = torch.load(checkpoint_filename, 
-                             map_location=lambda storage, loc: storage,
-                             weights_only=False)
+                             map_location=lambda storage, loc: storage)
 
         self.net = net
         self.net.eval()
@@ -321,8 +309,11 @@ class PredModel(object):
 
         dataset_hparams = self.meta['dataset_hparams']
         MAX_N = self.meta.get('max_n', 32)
+
         USE_CUDA = self.USE_CUDA
+
         COMBINE_MAT_VECT='row'
+
 
         feat_vect_args = dataset_hparams['feat_vect_args']
         feat_mat_args = dataset_hparams['feat_mat_args']
@@ -334,13 +325,18 @@ class PredModel(object):
                                             combine_mat_vect=COMBINE_MAT_VECT)   
         dl = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False)
 
+
+        allres = []
+        alltrue = []
         results_df = []
+        m_pos = 0
         
         res = run_epoch(self.net, None, None, dl, 
                         pred_only = True, USE_CUDA=self.USE_CUDA,
                         return_pred = True, print_shapes=debug, desc='predict',
                         progress_bar=prog_bar)
         
+
         for rd_mol_i, (rdmol, true_val) in enumerate(zip(rdmols, values)):
             for nuc_i, nuc in enumerate(self.meta['tgt_nucs']):
                 true_nuc_spect = true_val[nuc_i]
@@ -359,6 +355,9 @@ class PredModel(object):
         results_df = pd.DataFrame(results_df)
         return results_df
     
+    
+  
+
 def rand_dict(d):
     p = {}
     for k, v in d.items():
@@ -368,8 +367,9 @@ def rand_dict(d):
             p[k] = v
     return p
 
+
 def create_validate_func(tgt_nucs):
-    def val_func(res): 
+    def val_func(res): # val, mask, truth):
         val = res['pred_res']
         mask = res['pred_mask']
         truth = res['pred_truth']
@@ -384,75 +384,24 @@ def create_validate_func(tgt_nucs):
     return val_func
 
 def create_uncertain_validate_func(tgt_nucs):
-    def val_func(res): 
+    def val_func(res): # val, mask, truth):
         mu = res['pred_mu']
         std = res['pred_std'] 
         mask = res['pred_mask']
         truth = res['pred_truth']
-        val_res = {}
+        res = {}
         for ni, n in enumerate(tgt_nucs):
-            # 1. Глобальная абсолютная ошибка (MAE)
             delta = (mu[:, :, ni] - truth[:, :, ni])[mask[:, :, ni] > 0].flatten()
-            mae_global = np.mean(np.abs(delta))
-            
-            # 2. Ошибка паттерна (MAE_pattern) через вычисление сдвига для каждой молекулы
-            mae_pattern_errors = []
-            for m_idx in range(mu.shape[0]):
-                m_mask = mask[m_idx, :, ni] > 0
-                if np.sum(m_mask) > 0:
-                    m_delta = truth[m_idx, m_mask, ni] - mu[m_idx, m_mask, ni]
-                    # Идеальный сдвиг, минимизирующий MAE для конкретной молекулы - это медиана ошибок
-                    m_shift = np.median(m_delta)
-                    m_pattern_delta = m_delta - m_shift
-                    mae_pattern_errors.extend(np.abs(m_pattern_delta))
-            
-            mae_pattern = np.mean(mae_pattern_errors) if len(mae_pattern_errors) > 0 else 0.0
-            mae_diff = mae_global - mae_pattern
-            
             masked_std = (std[:, :, ni])[mask[:, :, ni] > 0].flatten()
-            
-            # Логируем новые и старые метрики
-            val_res[f"{n}/test_mean_abs_err"] = mae_global
-            val_res[f"{n}/test_pattern_abs_err"] = mae_pattern
-            val_res[f"{n}/test_err_diff"] = mae_diff
-            
-            val_res[f"{n}/test_std_err"] = np.std(delta)
-            val_res[f"{n}/test_max_error"] = np.max(np.abs(delta))
-            val_res[f"{n}/test_abs_err_90"] = np.percentile(np.abs(delta), 90)
-            
-            val_res[f"{n}/std/mean"] = np.mean(masked_std)
-            val_res[f"{n}/std/min"] = np.min(masked_std)
-            val_res[f"{n}/std/max"] = np.max(masked_std)
+            res[f"{n}/test_std_err"] = np.std(delta)
+            res[f"{n}/test_max_error"] = np.max(np.abs(delta))
+            res[f"{n}/test_mean_abs_err"] = np.mean(np.abs(delta))
+            res[f"{n}/test_abs_err_90"] = np.percentile(np.abs(delta), 90)
+            res[f"{n}/std/mean"] = np.mean(masked_std)
+            res[f"{n}/std/min"] = np.min(masked_std)
+            res[f"{n}/std/max"] = np.max(masked_std)
 
-        return val_res
+        return res
     return val_func
 
-
-
-class EarlyStopping:
-    """
-    Ранняя остановка с автоматическим восстановлением лучших весов модели.
-    """
-    def __init__(self, patience=20, min_delta=1e-4):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
-        self.best_state = None  # <--- Хранилище для лучших весов
-
-    def __call__(self, val_loss, model): # <--- Теперь принимает саму модель
-        if self.best_loss is None:
-            self.best_loss = val_loss
-            self.best_state = copy.deepcopy(model.state_dict())
-        elif val_loss > self.best_loss - self.min_delta:
-            self.counter += 1
-            print(f"  [EarlyStop] Нет улучшений. Счетчик: {self.counter}/{self.patience}. Лучший Loss: {self.best_loss:.4f}")
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            print(f"  [EarlyStop] Улучшение! Loss снизился с {self.best_loss:.4f} до {val_loss:.4f}")
-            self.best_loss = val_loss
-            self.best_state = copy.deepcopy(model.state_dict()) # <--- Сохраняем слепок лучших весов
-            self.counter = 0
 

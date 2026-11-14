@@ -6,6 +6,7 @@ import torch.nn.functional as F
 class ResNet(nn.Module):
     def __init__(self, input_dim, hidden_dim, depth, init_std=1e-6, 
                  output_dim = None):
+        #print("Creating resnet with input_dim={} hidden_dim={} depth={}".format(input_dim, hidden_dim, depth))
         assert(depth >= 0)
         super(ResNet, self).__init__()
         self.linear_in = nn.Linear(input_dim, hidden_dim)
@@ -30,7 +31,7 @@ class ResidualBlock(nn.Module):
         self.l1 = nn.Linear(dim, dim)
         self.l2 = nn.Linear(dim, dim, bias = False)
         self.l1.bias.data.uniform_(-self.noise,self.noise)
-        self.l1.weight.data.uniform_(-self.noise,self.noise) 
+        self.l1.weight.data.uniform_(-self.noise,self.noise) #?!
         self.l2.weight.data.uniform_(-self.noise,self.noise)
 
     def forward(self, x):
@@ -38,25 +39,39 @@ class ResidualBlock(nn.Module):
 
     
 class SumLayers(nn.Module):
+    """
+    Fully-connected layers that sum elements in a set
+    """
     def __init__(self, input_D, input_max, filter_n, layer_count):
         super(SumLayers, self).__init__()
         self.fc1 = nn.Linear(input_D, filter_n)
         self.relu1 = nn.ReLU()
         self.fc_blocks = nn.ModuleList([nn.Sequential(nn.Linear(filter_n, filter_n), nn.ReLU()) for _ in range(layer_count-1)])
         
+        
     def forward(self, X, present):
-        xt = X  
+        # Pass the input through the linear layer,
+        # then pass that through log_softmax.
+        # Many non-linearities and other functions are in torch.nn.functional
+        
+        xt = X  # .transpose(1, 2)
         x = self.fc1(xt) 
         x = self.relu1(x)
         for fcre in self.fc_blocks:
             x = fcre(x)
         
         x = (present.unsqueeze(-1) * x)
+        
         return x.sum(1)
 
     
 
 class ClusterCountingNetwork(nn.Module):
+    """
+    A network to count the number of points in each
+    cluster. Very simple, mostly for pedagogy
+    """
+    
     def __init__(self, input_D, input_max, 
                  sum_fc_filternum, sum_fc_layercount, 
                  post_sum_fc, post_sum_layercount, 
@@ -98,7 +113,15 @@ class ResNetRegression(nn.Module):
         return self.net(X) 
 
 
+
+
 class PyTorchResNet(nn.Module):
+    """
+    This is a modification of the default pytorch resnet to allow 
+    for different input sizes, numbers of channels, kernel sizes, 
+    and number of block layers and classes
+    """
+
     def __init__(self, block, layers, input_img_size = 64, 
                  num_channels=3, 
                  num_classes=1, first_kern_size=7, 
@@ -157,6 +180,9 @@ class PyTorchResNet(nn.Module):
         x = self.relu(x)
         x = self.maxpool(x)
         x = self.block_layers_seq(x)
+        # for l in self.block_layers:
+            
+        #     x = l(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
@@ -164,7 +190,14 @@ class PyTorchResNet(nn.Module):
         return x
 
 
+
 class SimpleGraphModel(nn.Module):
+    """
+    Simple graph convolution model that outputs dense features post-relu
+
+    Add final layer for regression or classification
+    
+    """
     def __init__(self, MAX_N, input_feature_n, 
                  output_features_n, noise=1e-5, 
                  single_out_row=True, batch_norm = False, input_batch_norm=False):
@@ -187,7 +220,7 @@ class SimpleGraphModel(nn.Module):
             else:
                 lin = nn.Linear(output_features_n[i-1], output_features_n[i])
             lin.bias.data.uniform_(-self.noise,self.noise)
-            lin.weight.data.uniform_(-self.noise,self.noise) 
+            lin.weight.data.uniform_(-self.noise,self.noise) #?!
 
             self.linear_layers.append(lin)
             self.relus.append(nn.ReLU())
@@ -202,6 +235,8 @@ class SimpleGraphModel(nn.Module):
             x = self.input_batch_norm_layer(x.reshape(-1, self.input_feature_n))
             x = x.reshape(-1, self.MAX_N, self.input_feature_n)
             
+
+
         for l in range(len(self.linear_layers)):
             x = self.linear_layers[l](x)
             x = torch.bmm(G, x)
@@ -216,6 +251,9 @@ class SimpleGraphModel(nn.Module):
         
 
 class ResGraphModel(nn.Module):
+    """
+    Graphical resnet with batch norm structure
+    """
     def __init__(self, MAX_N, input_feature_n, 
                  output_features_n, noise=1e-5, 
                  single_out_row=True, batch_norm = False, 
@@ -240,8 +278,11 @@ class ResGraphModel(nn.Module):
                 lin = nn.Linear(input_feature_n, output_features_n[i])
             else:
                 lin = nn.Linear(output_features_n[i-1], output_features_n[i])
+            #nn.init.kaiming_uniform_(lin.weight.data, nonlinearity='relu')
+            #nn.init.kaiming_uniform_(lin.weight.data, nonlinearity='relu')
+
             lin.bias.data.uniform_(-self.noise,self.noise)
-            lin.weight.data.uniform_(-self.noise,self.noise) 
+            lin.weight.data.uniform_(-self.noise,self.noise) #?!
 
             self.linear_layers.append(lin)
             self.relus.append(nn.ReLU())
@@ -256,6 +297,8 @@ class ResGraphModel(nn.Module):
             x = self.input_batch_norm_layer(x.reshape(-1, self.input_feature_n))
             x = x.reshape(-1, self.MAX_N, self.input_feature_n)
             
+
+
         for l in range(len(self.linear_layers)):
             x1 = torch.bmm(G, self.linear_layers[l](x))
             x2 = self.relus[l](x1)
@@ -274,6 +317,9 @@ class ResGraphModel(nn.Module):
         else:
             return x
         
+
+        
+
 def goodmax(x, dim):
     return torch.max(x, dim=dim)[0]
 
@@ -281,6 +327,14 @@ class GraphMatLayer(nn.Module):
     def __init__(self, C, P , GS=1,  
                  noise=1e-6, agg_func=None, 
                  dropout=0.0):
+        """
+        Pairwise layer -- takes a N x M x M x C matrix
+        and turns it into a N x M x M x P matrix after
+        multiplying with a graph matrix N x M x M
+        
+        if GS != 1 then there will be a per-graph-channel 
+        linear layer
+        """
         super(GraphMatLayer, self).__init__()
 
         self.GS = GS
@@ -292,11 +346,12 @@ class GraphMatLayer(nn.Module):
         for ll in range(GS):
             l = nn.Linear(C, P)
             l.bias.data.normal_(0.0, self.noise)
-            l.weight.data.normal_(0.0, self.noise) 
+            l.weight.data.normal_(0.0, self.noise) #?!
             self.linlayers.append(l)
             if dropout > 0.0:
                 self.dropout_layers.append(nn.Dropout(p=dropout))
             
+        #self.r = nn.PReLU()
         self.r = nn.ReLU()
         self.agg_func = agg_func
  
@@ -308,6 +363,7 @@ class GraphMatLayer(nn.Module):
             return y
 
         multi_x = torch.stack([apply_ll(i,x) for i in range(self.GS)])
+        # this is per-batch-element
         xout = torch.stack([torch.matmul(G[i], multi_x[:, i]) for i in range(x.shape[0])])
 
         x = self.r(xout)
@@ -347,6 +403,8 @@ class GraphMatLayers(nn.Module):
             else:
                 x3 = x2
             x = x3
+        
+
         return x
 
 class GraphMatHighwayLayers(nn.Module):
@@ -388,27 +446,41 @@ class GraphMatHighwayLayers(nn.Module):
 
 def batch_diagonal_extract(x):
     BATCH_N, M, _, N = x.shape
+
     return torch.stack([x[:, i, i, :] for i in range(M)], dim=1)
 
 class GraphMatModel(nn.Module):
     def __init__(self, g_feature_n, g_feature_out_n, resnet=True, 
                  noise=1e-5, GS=1, OUT_DIM=1 ):
+        """
+        g_features_in : how many per-edge features
+        g_features_out : how many per-edge features 
+        """
         super(GraphMatModel, self).__init__()
+
         self.gml = GraphMatLayers(g_feature_n, g_feature_out_n, 
                                   resnet=resnet, noise=noise, GS=GS)
+        
+    
         self.lin_out = nn.Linear(g_feature_out_n[-1], OUT_DIM )
+        #torch.nn.init.kaiming_uniform_(self.lin_out.weight.data, nonlinearity='relu')
 
     def forward(self, args):
         (G, x_G) = args
+
         G_features = self.gml(G, x_G)
+        ## OLD WAY
+        
         g_diag = batch_diagonal_extract(G_features)
         x_1 = self.lin_out(g_diag)
+        
         return x_1
 
 
 class GraphVertModel(nn.Module):
     def __init__(self, g_feature_n, g_feature_out_n=None, 
                  int_d = None, layer_n = None, 
+
                  resnet=True, 
                  init_noise=1e-5, agg_func=None, GS=1, OUT_DIM=1, 
                  batch_norm=False, out_std= False, 
@@ -417,8 +489,13 @@ class GraphVertModel(nn.Module):
                  graph_dropout=0.0, 
                  force_lin_init=False):
         
+        """
+
+        
+        """
         if layer_n is not None:
             g_feature_out_n = [int_d] * layer_n
+
 
         super(GraphVertModel, self).__init__()
         self.gml = GraphMatLayers(g_feature_n, g_feature_out_n, 
@@ -445,6 +522,12 @@ class GraphVertModel(nn.Module):
         if out_std:
             self.lin_out_std1 = nn.Linear(g_feature_out_n[-1], 128)
             self.lin_out_std2 = nn.Linear(128, OUT_DIM)
+
+            # self.lin_out_std = ResNetRegression(g_feature_out_n[-1], 
+            #                                     block_sizes = resnet_blocks, 
+            #                                     INT_D = resnet_d, 
+            #                                     FINAL_D=resnet_d, 
+            #                                     OUT_DIM=OUT_DIM)
 
         if force_lin_init:
             for m in self.modules():
@@ -475,8 +558,14 @@ class GraphVertModel(nn.Module):
         else:
             x_1 = self.lin_out(g_squeeze)
         if self.out_std:
+
             x_std = F.relu(self.lin_out_std1(g_squeeze))
             x_1_std = F.relu(self.lin_out_std2(x_std))
+                           
+            # g_2 = F.relu(self.lin_out_std(g_squeeze_flat))
+
+            # x_1_std = g_2.reshape(BATCH_N, MAX_N, -1)
+
             return {'mu' : x_1, 'std' : x_1_std}
         else:
             return x_1
@@ -488,6 +577,10 @@ class GraphVertResOutModel(nn.Module):
                  batch_norm=False, out_std= False, 
                  force_lin_init=False):
         
+        """
+
+        
+        """
         super(GraphVertResOutModel, self).__init__()
         self.gml = GraphMatLayers(g_feature_n, g_feature_out_n, 
                                   resnet=resnet, noise=noise, agg_func=agg_func, 
@@ -508,6 +601,10 @@ class GraphVertResOutModel(nn.Module):
 
         self.out_std = out_std
 
+        # if out_std:
+        #     self.lin_out_std = nn.Linear(g_feature_out_n[-1], 32)
+        #     self.lin_out_std1 = nn.Linear(32, OUT_DIM)
+
         if force_lin_init:
             for m in self.modules():
                 if isinstance(m, nn.Linear):
@@ -526,9 +623,22 @@ class GraphVertResOutModel(nn.Module):
             x_G = x_G_out_flat.reshape(BATCH_N, MAX_N, F_N)
         
         G_features = self.gml(G, x_G)
+        
         g_squeeze = G_features.squeeze(1).reshape(-1, G_features.shape[-1])
+
+
         x_1 = self.lin_out(g_squeeze)
+
         return x_1.reshape(BATCH_N, MAX_N, -1)
+
+        # if self.out_std:
+        #     x_1_std = F.relu(self.lin_out_std(g_squeeze))
+        #     x_1_std = F.relu(self.lin_out_std1(x_1_std))
+
+        #     return x_1, x_1_std
+        # else:
+        #     return x_1
+
 
 
 def parse_agg_func(agg_func):
@@ -553,6 +663,11 @@ class GraphVertExtraLinModel(nn.Module):
                  use_highway = False, 
                  use_graph_conv = True, 
                  extra_lin_int_d = 128 ):
+        
+        """
+
+        
+        """
         super(GraphVertExtraLinModel, self).__init__()
 
         if layer_n is not None:
@@ -560,11 +675,13 @@ class GraphVertExtraLinModel(nn.Module):
         print("g_feature_n=", g_feature_n)
         self.use_highway = use_highway
         if use_highway:
+
             self.gml = GraphMatHighwayLayers(g_feature_n, g_feature_out_n, 
                                       resnet=resnet, noise=init_noise, 
                                       agg_func=parse_agg_func(agg_func), 
                                       GS=GS)
         else:
+
             self.gml = GraphMatLayers(g_feature_n, g_feature_out_n, 
                                       resnet=resnet, noise=init_noise, 
                                       agg_func=parse_agg_func(agg_func), 
@@ -599,6 +716,7 @@ class GraphVertExtraLinModel(nn.Module):
                                                   G_highway.shape[1], -1)
         else:
             G_features = self.gml(G, x_G)
+
         
         g_squeeze = G_features.squeeze(1)
         out_feat = []
@@ -638,6 +756,7 @@ class MSELogNormalLoss(nn.Module):
         log_pdf = - (y-mu)**2/(2.0 * std **self.std_pow)
         if self.use_std_term :
             log_pdf += std_term 
+
         return -log_pdf.mean()
 
 
@@ -668,9 +787,21 @@ class MSECustomLoss(nn.Module):
         else:
             log = torch.log
         std = std + self.std_regularize
+
+        # std_term = -0.5 * log(2*np.pi * std**self.std_pow ) 
+        # log_pdf = - (y-mu)**2/(2.0 * std **self.std_pow)
+
+        # if self.use_std_term :
+        #     log_pdf += std_term 
+
+        # return -log_pdf.mean()
         return -log_normal(y, mu, std).mean()
 
 class MaskedMSELoss(nn.Module):
+    """
+    Masked mean squared error
+    """
+
     def __init__(self):
         super(MaskedMSELoss, self).__init__()
         self.mseloss = nn.MSELoss()
@@ -681,6 +812,10 @@ class MaskedMSELoss(nn.Module):
         return self.mseloss(x_masked, y_masked)
 
 class MaskedMSSELoss(nn.Module):
+    """
+    Masked mean squared error
+    """
+
     def __init__(self):
         super(MaskedMSSELoss, self).__init__()
         
@@ -689,7 +824,13 @@ class MaskedMSSELoss(nn.Module):
         y_masked = y[mask>0].reshape(-1, 1)
         return ((x_masked - y_masked)**4).mean()
 
+
+
 class MaskedMSEScaledLoss(nn.Module):
+    """
+    Masked mean squared error
+    """
+
     def __init__(self):
         super(MaskedMSELoss, self).__init__()
         self.mseloss = nn.MSELoss()
@@ -700,57 +841,10 @@ class MaskedMSEScaledLoss(nn.Module):
         return self.mseloss(x_masked, y_masked)
 
 
-class MaskedMSELossForPretrain(nn.Module):
-    """
-    Протокол предварительного обучения: минимизирует MSE для агрессивного и быстрого сдвига mu.
-    """
-    def __init__(self, mu_scale):
-        super().__init__()
-        self.mu_scale = mu_scale
-
-    def __call__(self, pred, y, mask):
-        mu = pred['mu'].float()
-        y = y.float()
-        mask = mask.float()
-
-        mu_scale = self.mu_scale.to(y.device).float()
-
-        y_scaled = y / mu_scale
-        mu_scaled = mu / mu_scale
-
-        # MSE вместо L1 дает экспоненциально более сильный градиент на старте
-        sq_diff = (y_scaled[mask > 0] - mu_scaled[mask > 0])**2
-        
-        return sq_diff.mean()
-
-
-class MaskedL1Loss(nn.Module):
-    """
-    Протокол предварительного обучения: минимизирует только ошибку предсказания (MAE), 
-    игнорируя предсказанную неопределенность (sigma), чтобы избежать паралича градиентов.
-    """
-    def __init__(self, mu_scale):
-        super(MaskedL1Loss, self).__init__()
-        self.mu_scale = mu_scale
-
-    def __call__(self, pred, y, mask):
-        # Принудительно в FP32 для защиты от NaN
-        mu = pred['mu'].float()
-        y = y.float()
-        mask = mask.float()
-
-        mu_scale = self.mu_scale.to(y.device).float()
-
-        y_scaled = y / mu_scale
-        mu_scaled = mu / mu_scale
-
-        # Считаем модуль разницы только для реальных атомов (где mask > 0)
-        abs_diff = torch.abs(y_scaled[mask > 0] - mu_scaled[mask > 0])
-        
-        return abs_diff.mean()
-
-
 class NormUncertainLoss(nn.Module):
+    """
+    Masked uncertainty loss
+    """
     def __init__(self, 
                  mu_scale = torch.Tensor([1.0]), 
                  std_scale = torch.Tensor([1.0]), 
@@ -766,18 +860,15 @@ class NormUncertainLoss(nn.Module):
         self.std_scale = std_scale
 
     def __call__(self, pred, y,  mask):
-        # === ДОБАВЛЕНО: ПРИНУДИТЕЛЬНЫЙ ПЕРЕХОД В FP32 ===
-        mu = pred['mu'].float() 
-        std = pred['std'].float()
-        y = y.float()
-        mask = mask.float()
-        # ================================================
+        ### NOTE pred is a tuple! 
+        mu, std = pred['mu'], pred['std']
 
         if self.use_log1p:
             log = torch.log1p
         else:
             log = torch.log
         std = std + self.std_regularize
+
 
         y_scaled = y / self.mu_scale
         mu_scaled = mu / self.mu_scale
@@ -786,68 +877,12 @@ class NormUncertainLoss(nn.Module):
         y_scaled_masked = y_scaled[mask>0].reshape(-1, 1)
         mu_scaled_masked = mu_scaled[mask>0].reshape(-1, 1)
         std_scaled_masked = std_scaled[mask>0].reshape(-1, 1)
-
+        # return -log_normal_nolog(y_scaled_masked, 
+        #                          mu_scaled_masked, 
+        #                          std_scaled_masked).mean()
         return -log_normal_nolog(y_scaled_masked, 
                               mu_scaled_masked, 
                               std_scaled_masked).mean()
 
-class NormUncertainCalibrationLoss(nn.Module):
-    """
-    Masked uncertainty loss with per-molecule calibration shift (c_m)
-    and L1 penalty to anchor the absolute scale.
-    """
-    def __init__(self, 
-                 mu_scale = torch.Tensor([1.0]), 
-                 std_scale = torch.Tensor([1.0]), 
-                 std_regularize=0.0,
-                 lambda_penalty=1.0):
-        super(NormUncertainCalibrationLoss, self).__init__()
-        self.mu_scale = mu_scale
-        self.std_scale = std_scale
-        self.std_regularize = std_regularize
-        self.lambda_penalty = lambda_penalty
 
-    def forward(self, pred, y, mask):
-        # === ПРИНУДИТЕЛЬНЫЙ ПЕРЕХОД В FP32 ДЛЯ СТАБИЛЬНОСТИ ===
-        mu  = pred['mu'].float() 
-        std = pred['std'].float()
-        y = y.float()
-        mask = mask.float()
-        
-        std = std + self.std_regularize
 
-        mu_scale = self.mu_scale.to(y.device).float()
-        std_scale = self.std_scale.to(y.device).float()
-
-        y_scaled = y / mu_scale
-        mu_scaled = mu / mu_scale
-        std_scaled = std / std_scale
-
-        variance = std_scaled ** 2
-        w = mask / variance
-        delta = y_scaled - mu_scaled
-        
-        sum_w = w.sum(dim=1, keepdim=True)
-        sum_w_clamped = torch.clamp(sum_w, min=1e-9)
-        
-        # Weighted shift c_m (Градиенты включены)
-        c_m = (delta * w).sum(dim=1, keepdim=True) / sum_w_clamped
-        c_m = c_m * (sum_w > 0).float()
-        
-        # МАГИЯ ЗДЕСЬ: Для расчета NLL используем ОТВЯЗАННЫЙ c_m
-        # Сеть больше не сможет манипулировать сигмой, чтобы обнулить NLL 
-        mu_calib = mu_scaled + c_m.detach()
-        
-        # Element-wise NLL with calibrated mu
-        element_wise = - (y_scaled - mu_calib)**2 / (2 * variance) - torch.log(std_scaled)
-        
-        log_pdf = element_wise * mask
-        nll_loss = -log_pdf.sum() / torch.clamp(mask.sum(), min=1.0)
-        
-        # L1 Penalty on absolute c_m for global anchor
-        active_mols = (sum_w > 0).float()
-        c_m_penalty = c_m.abs().sum() / torch.clamp(active_mols.sum(), min=1.0)
-        
-        total_loss = nll_loss + self.lambda_penalty * c_m_penalty
-        
-        return total_loss, nll_loss, c_m_penalty
