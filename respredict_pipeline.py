@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+import shutil
 from glob import glob
 import json 
 import time
@@ -27,14 +28,15 @@ import netdataio
 import itertools
 import graph_conv_many_nuc_util
 from graph_conv_many_nuc_util import move
+import plot_z_score
 
 # === 1. ПАРСИНГ АРГУМЕНТОВ КОМАНДНОЙ СТРОКИ ===
 parser = argparse.ArgumentParser(description="NMR GNN Training Pipeline")
-parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib", "auto"], default="auto", 
+parser.add_argument("--protocol", "--stage", dest="protocol", type=str, choices=["warmup", "molcalib", "auto"], default="auto", 
                     help="Режим: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib)")
-parser.add_argument("--weights", type=str, default="", 
+parser.add_argument("--weights", "--checkpoint", dest="weights", type=str, default="", 
                     help="Путь к файлу предобученных весов (.state или .model)")
-parser.add_argument("--nucleus", type=str, choices=["13C", "1H"], default="13C", 
+parser.add_argument("--nucleus", "--nuc", dest="nucleus", type=str, choices=["13C", "1H"], default="13C", 
                     help="Целевое ядро для предсказаний")
 parser.add_argument("--min_error", type=float, default=None, 
                     help="Минимальная ошибка (std_regularize) в ppm. По умолчанию: 13C=0.1, 1H=0.01")
@@ -52,6 +54,34 @@ cm_group.add_argument("--L2Cm", action="store_true",
 parser.add_argument("--lambda_penalty", type=float, default=None,
                     help="Явный вес штрафа LAMBDA_PENALTY (если не указан, выбирается автоматически под норму и ядро)")
 args, unknown = parser.parse_known_args()
+
+# Поддержка передачи аргументов в формате key=value без дефисов (например, checkpoint=... stage=... nuc=...)
+for u in unknown:
+    u_clean = u.lstrip("-")
+    if "=" in u_clean:
+        k, v = u_clean.split("=", 1)
+        if k in ("protocol", "stage"):
+            args.protocol = v
+        elif k in ("weights", "checkpoint", "state"):
+            args.weights = v
+        elif k in ("nucleus", "nuc"):
+            args.nucleus = v
+        elif k == "cv_i":
+            args.cv_i = int(v)
+        elif k == "max_epochs":
+            args.max_epochs = int(v)
+        elif k == "min_error":
+            args.min_error = float(v)
+        elif k == "lambda_penalty":
+            args.lambda_penalty = float(v)
+    elif u not in ("--",):
+        print(f"WARNING: Нераспознанный аргумент командной строки: '{u}'")
+
+if args.protocol == "molcalib" and not args.weights:
+    raise ValueError(
+        "ОШИБКА: Для запуска этапа 'molcalib' необходимо указать путь к чекпоинту предобученной модели "
+        "через --weights <path> или --checkpoint <path> (или используй --protocol auto для полного цикла warmup -> molcalib)."
+    )
 
 SPECT_SET = args.nucleus
 PROTOCOL = args.protocol
@@ -229,17 +259,21 @@ def train(infile, outfile, seed):
     dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
     dl_test = DataLoader(ds_test, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, persistent_workers=True)
 
+    # Неперемешанные DataLoader'ы для быстрой выгрузки CSV и отрисовки графиков каждые 10 эпох
+    dl_train_eval = DataLoader(ds_train, batch_size=64, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
+    dl_test_eval = DataLoader(ds_test, batch_size=64, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
+
     net_params = net_params_base.copy()
     net_params['g_feature_n'] = g_feature_n
     net_params['OUT_DIM'] =  len(tgt_nucs)
 
     # === 2. СОЗДАНИЕ СЕТИ И ЗАГРУЗКА ПРЕДОБУЧЕННЫХ ВЕСОВ ===
-    if LOAD_WEIGHTS and os.path.exists(LOAD_WEIGHTS):
+    if LOAD_WEIGHTS:
+        if not os.path.exists(LOAD_WEIGHTS):
+            raise FileNotFoundError(f"ОШИБКА: Указанный файл чекпоинта не найден: {LOAD_WEIGHTS}")
         print(f"Loading pre-trained weights from {LOAD_WEIGHTS}...")
         net = load_pretrained_checkpoint(LOAD_WEIGHTS, net_params)
     else:
-        if LOAD_WEIGHTS:
-            print(f"WARNING: Checkpoint {LOAD_WEIGHTS} not found! Initializing from scratch.")
         net = nets.GraphVertModel(**net_params)
 
     net = move(net, USE_CUDA)
@@ -258,6 +292,8 @@ def train(infile, outfile, seed):
         protocols_to_run = ["warmup", "molcalib"]
     else:
         protocols_to_run = [PROTOCOL]
+
+    smoke_stage_names = []
 
     # === 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК ЭТАПОВ ===
     for stage_protocol in protocols_to_run:
@@ -297,10 +333,32 @@ def train(infile, outfile, seed):
                                                     gamma=opt_params['scheduler_gamma'])
 
         STAGE_MODEL_NAME = "{}_{}.{:08d}".format(EXP_NAME, stage_protocol, int(time.time() % 1e8))
-        checkpoint_filename = os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME + ".{epoch_i:08d}")
+        smoke_stage_names.append(STAGE_MODEL_NAME)
+        checkpoint_base_prefix = os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME)
+        checkpoint_filename = checkpoint_base_prefix + ".{epoch_i:08d}"
         print("Checkpoint template:", checkpoint_filename)
         checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
-                            
+
+        # Колбэк для выгрузки CSV и отрисовки графиков каждые 10 эпох (без сохранения тяжелых .state/.model)
+        def plot_every_10_epochs(epoch_i, net, test_res=None,
+                                 _prefix=checkpoint_base_prefix, _stage=stage_protocol):
+            if epoch_i % 10 != 0:
+                return
+            plot_z_score.save_csv_and_plot_epoch(
+                net=net,
+                dl_train_eval=dl_train_eval,
+                dl_test_eval=dl_test_eval,
+                tgt_nucs=tgt_nucs,
+                checkpoint_prefix=_prefix,
+                epoch_i=epoch_i,
+                std_reg=loss_config['std_regularize'],
+                protocol=_stage,
+                spect_set=SPECT_SET,
+                plots_dir=f"plots_{SPECT_SET}",
+                use_cuda=USE_CUDA,
+                test_res=None
+            )
+
         writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
 
         metadata = {'dataset_hparams' : dataset_hparams, 
@@ -321,14 +379,15 @@ def train(infile, outfile, seed):
                                                 MAX_EPOCHS=stage_max_epochs, 
                                                 USE_CUDA=USE_CUDA, writer=writer, 
                                                 validate_func= validate_func, 
-                                                checkpoint_func= checkpoint_func)
-                                                
+                                                checkpoint_func= checkpoint_func,
+                                                plot_func=plot_every_10_epochs)
+        writer.close()
+
         # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
         best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
         best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.model")
 
-        # Если ранее была применена обертка DataParallel для нескольких GPU,
-        # нужно сохранять внутренний модуль (net.module), а не саму обертку.
+        # Если ранее была применена обертка DataParallel для нескольких GPU,\n        # нужно сохранять внутренний модуль (net.module), а не саму обертку.
         if isinstance(net, torch.nn.DataParallel):
             torch.save(net.module.state_dict(), best_state_path)
             torch.save(net.module, best_model_path)
@@ -338,18 +397,41 @@ def train(infile, outfile, seed):
         print(f"Финальные веса этапа {stage_protocol} сохранены :\n  {best_state_path}\n  {best_model_path}")
         # --------------------------
 
+    if args.smoke_test:
+        print("\n[SMOKE TEST] Тест успешно завершен без ошибок. Автоматическая очистка временных файлов...")
+        for s_name in smoke_stage_names:
+            for pattern in [
+                os.path.join(CHECKPOINT_DIR, f"{s_name}*"),
+                os.path.join(f"plots_{SPECT_SET}", f"{s_name}*"),
+            ]:
+                for fpath in glob(pattern):
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+            tb_log_dir = os.path.join(TENSORBOARD_DIR, s_name)
+            if os.path.exists(tb_log_dir):
+                shutil.rmtree(tb_log_dir, ignore_errors=True)
+        print("[SMOKE TEST] Все временные чекпоинты, CSV, графики и логи TensorBoard удалены.\n")
+
     pickle.dump({'net_params' : net_params, 
                  'opt_params' : opt_params, 
                  'loss_params' : loss_config}, 
                 open(outfile, 'wb'))
 
 if __name__ == "__main__":
-    import glob
     # Принудительно удаляем старые маркеры выполнения Ruffus перед запуском
-    for old_out_file in glob.glob(f"respredict_pipeline_{SPECT_SET}.*.out"):
+    for old_out_file in glob(f"respredict_pipeline_{SPECT_SET}.*.out"):
         try:
             os.remove(old_out_file)
         except OSError:
             pass
             
     pipeline_run([train])
+
+    if args.smoke_test:
+        for out_file in glob(f"respredict_pipeline_{SPECT_SET}.*.out"):
+            try:
+                os.remove(out_file)
+            except OSError:
+                pass

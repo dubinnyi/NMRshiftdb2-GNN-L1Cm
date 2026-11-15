@@ -227,7 +227,8 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    MAX_EPOCHS=1000, 
                    USE_CUDA=True, use_std=False, 
                    writer=None, validate_func = None, 
-                   checkpoint_func = None):
+                   checkpoint_func = None,
+                   plot_func = None):
 
     # === ИНИЦИАЛИЗАЦИЯ GradScaler ===
     scaler = torch.amp.GradScaler('cuda', enabled=USE_CUDA)
@@ -246,8 +247,12 @@ def generic_runner(net, optimizer, scheduler, criterion,
                                pred_only = False, USE_CUDA=USE_CUDA, desc='train',
                                scaler=scaler)
 
-        train_loss = train_res['running_loss'] / train_res['total_points']
+        train_loss = float(train_res['running_loss'] / train_res['total_points'])
         print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")
+
+        if not np.isfinite(train_loss):
+            print(f"\n[ОШИБКА] Обнаружен NaN/Inf в Train Loss на эпохе {epoch_i}! Прерывание обучения и откат к лучшим весам.")
+            break
 
         if writer is not None:
             writer.add_scalar("train_loss_total", train_res['running_loss']/train_res['total_points'], epoch_i)
@@ -263,14 +268,18 @@ def generic_runner(net, optimizer, scheduler, criterion,
 
 
             # --- ЛОГИКА РАННЕЙ ОСТАНОВКИ ---
-            test_loss = test_res['running_loss'] / test_res['total_points']
+            test_loss = float(test_res['running_loss'] / test_res['total_points'])
             early_stopping(test_loss, net)  # <--- ПЕРЕДАЕМ NET
         
             for metric_name, metric_val in validate_func(test_res).items():
-                writer.add_scalar(metric_name, metric_val, epoch_i)
+                if np.isfinite(metric_val):
+                    writer.add_scalar(metric_name, metric_val, epoch_i)
             
         if checkpoint_func is not None:
             checkpoint_func(epoch_i = epoch_i, net =net, optimizer=optimizer)
+
+        if plot_func is not None:
+            plot_func(epoch_i = epoch_i, net = net)
 
         if scheduler is not None:
             scheduler.step()
@@ -442,6 +451,12 @@ class EarlyStopping:
         self.best_state = None  # <--- Хранилище для лучших весов
 
     def __call__(self, val_loss, model): # <--- Теперь принимает саму модель
+        if not np.isfinite(val_loss):
+            self.counter += 1
+            print(f"  [EarlyStop] ВНИМАНИЕ: Val Loss = {val_loss} (NaN/Inf)! Остановка обучения.")
+            self.early_stop = True
+            return
+
         if self.best_loss is None:
             self.best_loss = val_loss
             self.best_state = copy.deepcopy(model.state_dict())
@@ -455,4 +470,3 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.best_state = copy.deepcopy(model.state_dict()) # <--- Сохраняем слепок лучших весов
             self.counter = 0
-
