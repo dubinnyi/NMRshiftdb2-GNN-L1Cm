@@ -58,6 +58,8 @@ parser.add_argument("--lr", type=float, default=None,
                     help=_("Explicit learning rate. Default: warmup=1e-4, molcalib=3e-5"))
 parser.add_argument("--max_d_nu", type=float, default=0.42,
                     help=_("Allowed per-stage increase in Student-t df divergence (df_train - df_test). Default: 0.42 (two-stage cap <= 0.84)"))
+parser.add_argument("--min_epochs", type=int, default=None,
+                    help=_("Minimum number of base training epochs before early stopping is armed (default: warmup=50, molcalib=20)"))
 args, unknown = parser.parse_known_args()
 
 # Support key=value arguments passed without leading dashes (e.g. checkpoint=... stage=... nuc=...)
@@ -83,6 +85,8 @@ for u in unknown:
             args.lr = float(v)
         elif k in ("max_d_nu", "d_nu"):
             args.max_d_nu = float(v)
+        elif k == "min_epochs":
+            args.min_epochs = int(v)
     elif u not in ("--",):
         print(_("WARNING: Unrecognized command-line argument: '{arg}'", arg=u))
 
@@ -259,7 +263,7 @@ def train(infile, outfile, seed):
         smoke_n = min(2 * BATCH_SIZE, len(ds_train))
         smoke_test_n = min(2 * BATCH_SIZE, len(ds_test))
         ds_train = torch.utils.data.Subset(ds_train, range(smoke_n))
-        ds_test = torch.utils.data.Subset(ds_test, range(smoke_test_n))
+        ds_test = torch.utils.data.Subset(ds_test, range(smoke_test_n))\
                                                                
     print(_("Dataset size (>= {min_atoms} target {spect_set} nuclei): Train={n_train}, Test={n_test}",
             min_atoms=MIN_ATOMS, spect_set=SPECT_SET, n_train=len(ds_train), n_test=len(ds_test)))
@@ -307,11 +311,12 @@ def train(infile, outfile, seed):
         opt_params = opt_params_base.copy()
         
         stage_max_epochs = MAX_EPOCHS
+        stage_min_epochs = args.min_epochs if args.min_epochs is not None else (50 if stage_protocol == 'warmup' else 20)
 
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
             opt_params['lr'] = args.lr if args.lr is not None else 3e-5
-            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}) ===")
+            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ===")
             criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
                                                           std_regularize=loss_config['std_regularize'],
                                                           lambda_penalty=LAMBDA_PENALTY,
@@ -319,13 +324,14 @@ def train(infile, outfile, seed):
 
         else: # warmup
             opt_params['lr'] = args.lr if args.lr is not None else 1e-4
-            print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}) ===")
+            print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ===")
             criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
                                                std_regularize=loss_config['std_regularize'])
             stage_max_epochs = 300
 
         if args.smoke_test:
             stage_max_epochs = 2
+            stage_min_epochs = 0
         print("="*60 + "\n")
 
         validate_func = graph_conv_many_nuc_util.create_uncertain_validate_func(tgt_nucs)
@@ -391,7 +397,8 @@ def train(infile, outfile, seed):
                                                 checkpoint_func= checkpoint_func,
                                                 plot_func=plot_every_10_epochs,
                                                 stage=stage_protocol,
-                                                max_d_nu=args.max_d_nu)
+                                                max_d_nu=args.max_d_nu,
+                                                min_epochs=stage_min_epochs)
         writer.close()
 
         best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")

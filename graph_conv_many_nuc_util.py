@@ -114,11 +114,20 @@ def create_checkpoint_func(every_n, filename_str):
         return {'savetime' : (t2-t1)}
     return checkpoint
 
+
+def has_nonfinite_parameters(net):
+    """Return True if any parameter tensor in `net` contains NaN or Inf."""
+    for p in net.parameters():
+        if not torch.isfinite(p).all():
+            return True
+    return False
+
+
 def run_epoch(net, optimizer, criterion, dl, 
                pred_only = False, USE_CUDA=True,
                return_pred = False, desc="train", 
               print_shapes=False, progress_bar=True,
-              scaler=None):
+              scaler=None, max_grad_norm=10.0):
     t1_total= time.time()
 
     accum_pred = []
@@ -126,7 +135,16 @@ def run_epoch(net, optimizer, criterion, dl,
     running_nll = 0.0
     running_penalty = 0.0
     total_points = 0
+    skipped_batches = 0
     total_compute_time = 0.0
+
+    # Prefer bfloat16 on Ampere+ GPUs (same dynamic range as float32, up to 3.4e38,
+    # preventing float16 overflow > 65504 on large 13C chemical shift residuals).
+    amp_dtype = (
+        torch.bfloat16
+        if (USE_CUDA and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+        else torch.float16
+    )
     
     if progress_bar:
         iterator = tqdm(enumerate(dl), total=len(dl), desc=desc)
@@ -148,8 +166,7 @@ def run_epoch(net, optimizer, criterion, dl,
         mask_t = move(mask, USE_CUDA)
         vals_t = move(vals, USE_CUDA)
 
-        # Enable AMP (FP16) autocast for forward pass and loss evaluation
-        with torch.amp.autocast('cuda', enabled=USE_CUDA):
+        with torch.amp.autocast('cuda', enabled=USE_CUDA, dtype=amp_dtype):
             res = net((adj_t, vect_feat_t))
 
             if return_pred:
@@ -165,9 +182,9 @@ def run_epoch(net, optimizer, criterion, dl,
                 accum_pred.append(accum_pred_val)
 
             if criterion is None:
-                loss = 0.0
-                nll = 0.0
-                penalty = 0.0
+                loss = None
+                nll = None
+                penalty = None
             else:
                 loss_out = criterion(res, vals_t, mask_t)
                 if isinstance(loss_out, tuple):
@@ -177,22 +194,38 @@ def run_epoch(net, optimizer, criterion, dl,
                     nll = loss_out
                     penalty = torch.tensor(0.0, device=loss.device)
 
-        # Backward pass with GradScaler when AMP is active
-        if not pred_only:
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-
-        obs_points = mask.sum()
         if criterion is not None:
-            running_loss += loss.item() * obs_points
-            running_nll += nll.item() * obs_points
-            running_penalty += penalty.item() * obs_points
-        total_points += obs_points
+            # Guard against a single batch overflow poisoning the entire epoch's running_loss
+            # or corrupting model parameters during backward/step.
+            if not torch.isfinite(loss):
+                skipped_batches += 1
+                if not pred_only:
+                    optimizer.zero_grad()
+                t2 = time.time()
+                total_compute_time += (t2 - t1)
+                continue
+
+            if not pred_only:
+                if scaler is not None and scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    if max_grad_norm is not None and max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(net.parameters(), max_grad_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if max_grad_norm is not None and max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(net.parameters(), max_grad_norm)
+                    optimizer.step()
+
+            obs_points = float(mask.sum().item())
+            running_loss += float(loss.item()) * obs_points
+            running_nll += float(nll.item()) * obs_points
+            running_penalty += float(penalty.item()) * obs_points
+            total_points += obs_points
+        else:
+            total_points += float(mask.sum().item())
 
         t2 = time.time()
         total_compute_time += (t2-t1)
@@ -204,6 +237,7 @@ def run_epoch(net, optimizer, criterion, dl,
             'running_nll' : running_nll,
             'running_penalty' : running_penalty,
             'total_points' : total_points, 
+            'skipped_batches' : skipped_batches,
             'time' : t2_total-t1_total, 
             'compute_time' : total_compute_time, 
             }
@@ -232,22 +266,30 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    stage='warmup',
                    max_d_nu=0.42,
                    df_patience=2,
-                   min_te_nu=2.0):
+                   min_te_nu=2.0,
+                   min_epochs=None):
 
-    scaler = torch.amp.GradScaler('cuda', enabled=USE_CUDA)
+    # GradScaler is only needed for float16 (bfloat16 has full float32 exponent range)
+    use_bf16 = (USE_CUDA and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+    scaler = torch.amp.GradScaler('cuda', init_scale=1024.0, enabled=(USE_CUDA and not use_bf16))
 
-    # Initialize early stopping with Student-t df divergence (d_nu = df_train - df_test) monitoring.
-    # patience=20 corresponds to 20 five-epoch validation checks (100 epochs) on the target metric;
-    # max_d_nu=0.42 sets the allowed per-stage increase in Student-t df divergence so that across
-    # both stages (warmup -> molcalib) cumulative divergence stays <= 0.84 (< 1.0).
+    if min_epochs is None:
+        min_epochs = 50 if stage == 'warmup' else 20
+
+    # Initialize early stopping with Student-t df divergence (d_nu = df_train - df_test) monitoring
+    # and a minimum base training period (min_epochs) before stopping rules become active.
     early_stopping = EarlyStopping(
         patience=20,
         min_delta=1e-4,
         stage=stage,
         max_d_nu=max_d_nu,
         df_patience=df_patience,
-        min_te_nu=min_te_nu
+        min_te_nu=min_te_nu,
+        min_epochs=min_epochs
     )
+
+    # Keep a snapshot of the last known finite weights so any transient numerical spike can be recovered
+    last_good_state = copy.deepcopy(net.state_dict())
 
     for epoch_i in tqdm(range(MAX_EPOCHS)):
 
@@ -258,18 +300,31 @@ def generic_runner(net, optimizer, scheduler, criterion,
                                pred_only = False, USE_CUDA=USE_CUDA, desc='train',
                                scaler=scaler)
 
-        train_loss = float(train_res['running_loss'] / train_res['total_points'])
+        if train_res.get('skipped_batches', 0) > 0:
+            print(_("  [Warning] Skipped {skipped} batches with non-finite loss in epoch {epoch_i}.",
+                    skipped=train_res['skipped_batches'], epoch_i=epoch_i))
+
+        pts = train_res['total_points']
+        train_loss = float(train_res['running_loss'] / pts) if pts > 0 else float('nan')
         print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")
 
-        if not np.isfinite(train_loss):
-            print(_("\n[ERROR] NaN/Inf detected in Train Loss at epoch {epoch_i}! Aborting training and restoring best weights.",
-                    epoch_i=epoch_i))
-            break
+        if not np.isfinite(train_loss) or has_nonfinite_parameters(net):
+            # Recover from last known finite weights and reduce learning rate instead of crashing out on early epochs
+            rollback_state = early_stopping.best_state if early_stopping.best_state is not None else last_good_state
+            net.load_state_dict(rollback_state)
+            for pg in optimizer.param_groups:
+                pg['lr'] = max(pg['lr'] * 0.5, 1e-6)
+            new_lr = optimizer.param_groups[0]['lr']
+            print(_("\n[WARNING] Non-finite weights/loss at epoch {epoch_i}! Restoring last valid weights, reducing lr to {lr:.2e}, and continuing training.",
+                    epoch_i=epoch_i, lr=new_lr))
+            continue
 
-        if writer is not None:
-            writer.add_scalar("train_loss_total", train_res['running_loss']/train_res['total_points'], epoch_i)
-            writer.add_scalar("train_loss_nll", train_res['running_nll']/train_res['total_points'], epoch_i)
-            writer.add_scalar("train_c_m_sq_penalty", train_res['running_penalty']/train_res['total_points'], epoch_i)
+        last_good_state = copy.deepcopy(net.state_dict())
+
+        if writer is not None and pts > 0:
+            writer.add_scalar("train_loss_total", train_res['running_loss']/pts, epoch_i)
+            writer.add_scalar("train_loss_nll", train_res['running_nll']/pts, epoch_i)
+            writer.add_scalar("train_c_m_sq_penalty", train_res['running_penalty']/pts, epoch_i)
 
         test_res = None
         val_metrics = {}
@@ -295,7 +350,8 @@ def generic_runner(net, optimizer, scheduler, criterion,
             metrics_row = plot_func(epoch_i = epoch_i, net = net, test_res = test_res)
 
         if epoch_i % 5 == 0 and test_res is not None:
-            test_loss = float(test_res['running_loss'] / test_res['total_points'])
+            test_pts = test_res['total_points']
+            test_loss = float(test_res['running_loss'] / test_pts) if test_pts > 0 else float('nan')
             # During molcalib fine-tuning, select best_state using calibrated pattern MAE
             # (te_mae_cal / test_pattern_abs_err) because raw test NLL increases when sigma tightens.
             pattern_err_vals = [v for k, v in val_metrics.items() if k.endswith('/test_pattern_abs_err')]
@@ -469,22 +525,25 @@ def create_uncertain_validate_func(tgt_nucs):
 class EarlyStopping:
     """
     Early stopping with automatic restoration of the best model weights, monitoring:
-    1) Student-t degrees-of-freedom divergence d_nu = df_train - df_test
+    1) Base training guard (min_epochs and scale <= 3.0): early stopping counters are disarmed
+       until the model completes initial convergence;
+    2) Student-t degrees-of-freedom divergence d_nu = df_train - df_test
        (for warmup, threshold = max_d_nu = 0.42; for molcalib, an additional +max_d_nu budget
        is added on top of initial d_nu_0, capped at 2 * max_d_nu = 0.84 < 1.0);
-    2) Minimum allowed test degrees of freedom (te_nu >= min_te_nu = 2.0, ensuring finite variance
+    3) Minimum allowed test degrees of freedom (te_nu >= min_te_nu = 2.0, ensuring finite variance
        of the test z-score distribution);
-    3) Stage-appropriate quality metric (Test NLL Loss for warmup, calibrated Test MAE_cal for molcalib),
+    4) Stage-appropriate quality metric (Test NLL Loss for warmup, calibrated Test MAE_cal for molcalib),
        updating best_state only while d_nu remains within the valid threshold.
     """
     def __init__(self, patience=20, min_delta=1e-4, stage='warmup',
-                 max_d_nu=0.42, df_patience=2, min_te_nu=2.0):
+                 max_d_nu=0.42, df_patience=2, min_te_nu=2.0, min_epochs=0):
         self.patience = patience
         self.min_delta = min_delta
         self.stage = stage
         self.max_d_nu = max_d_nu
         self.df_patience = df_patience
         self.min_te_nu = min_te_nu
+        self.min_epochs = min_epochs
 
         self.counter = 0
         self.df_counter = 0
@@ -500,10 +559,8 @@ class EarlyStopping:
 
     def __call__(self, val_loss, model, epoch_i=0, val_pattern_mae=None, metrics_row=None):
         if not np.isfinite(val_loss):
-            self.counter += 1
-            print(_("  [EarlyStop] WARNING: Val Loss = {val_loss} (NaN/Inf)! Stopping training.", val_loss=val_loss))
-            self.early_stop = True
-            self.stop_reason = _("NaN/Inf in validation Loss at epoch {epoch_i}", epoch_i=epoch_i)
+            print(_("  [EarlyStop] WARNING: Val Loss = {val_loss} (NaN/Inf) at epoch {epoch_i}! Ignoring invalid validation step.",
+                    val_loss=val_loss, epoch_i=epoch_i))
             return
 
         # Select target quality metric for best checkpoint tracking:
@@ -519,9 +576,13 @@ class EarlyStopping:
         else:
             target_val = val_loss
 
-        # 1. Check Student-t degrees-of-freedom divergence (d_nu = tr_nu - te_nu) every 10 epochs.
-        # Only evaluate once the distribution has entered the heavy-tailed Student-t regime (tr_nu < 20 and te_nu < 20)
-        # so random-init Gaussian noise at epoch 0 (nu ~ 1000) does not cause a false trigger.
+        # Check whether the model is still in its initial base convergence phase
+        sc_key = 'tr_sc_cal' if self.stage == 'molcalib' else 'tr_sc_raw'
+        tr_sc = metrics_row.get(sc_key, 1.0) if metrics_row is not None else 1.0
+        in_base_training = (epoch_i < self.min_epochs) or (np.isfinite(tr_sc) and tr_sc > 3.0)
+
+        # 1. Check Student-t degrees-of-freedom divergence (d_nu = tr_nu - te_nu) every 10 epochs
+        # once base training has converged (epoch_i >= min_epochs, scale <= 3.0, and nu < 20).
         if metrics_row is not None and self.max_d_nu is not None and self.max_d_nu > 0:
             d_nu_key = 'd_nu_cal' if self.stage == 'molcalib' else 'd_nu_raw'
             tr_nu_key = 'tr_nu_cal' if self.stage == 'molcalib' else 'tr_nu_raw'
@@ -532,12 +593,10 @@ class EarlyStopping:
             te_nu = metrics_row.get(te_nu_key, np.nan)
 
             if np.isfinite(d_nu) and np.isfinite(tr_nu) and np.isfinite(te_nu) and tr_nu < 20.0 and te_nu < 20.0:
-                if self.initial_d_nu is None:
+                # Record baseline initial_d_nu for molcalib once the scale is calibrated (tr_sc <= 3.0)
+                if self.initial_d_nu is None and (not np.isfinite(tr_sc) or tr_sc <= 3.0):
                     self.initial_d_nu = max(0.0, float(d_nu))
                     if self.stage == 'molcalib':
-                        # In the second stage (molcalib), add budget max_d_nu to initial d_nu_0,
-                        # capped at 2 * max_d_nu so total two-stage divergence stays < 1.0 df.
-                        # If the starting checkpoint already had high divergence, allow a minimal 0.5 * max_d_nu margin.
                         two_stage_cap = 2.0 * self.max_d_nu
                         if self.initial_d_nu < two_stage_cap - 0.10:
                             self.d_nu_limit = min(self.initial_d_nu + self.max_d_nu, two_stage_cap)
@@ -549,30 +608,36 @@ class EarlyStopping:
                             d_nu_key=d_nu_key, d_nu=d_nu, tr_nu=tr_nu, te_nu=te_nu,
                             stage=self.stage, limit=self.d_nu_limit))
 
-                df_violated = (d_nu > self.d_nu_limit) or (te_nu < self.min_te_nu)
-                if df_violated:
-                    self.is_overfitting_df = True
-                    self.df_counter += 1
-                    reason_detail = (
-                        f"{d_nu_key}={d_nu:.2f} > {self.d_nu_limit:.2f}"
-                        if d_nu > self.d_nu_limit
-                        else f"{te_nu_key}={te_nu:.2f} < {self.min_te_nu:.2f}"
-                    )
-                    print(_("  [EarlyStop DF] Student-t overfitting threshold exceeded ({detail}, tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). DF counter: {cnt}/{patience} (best weights locked at epoch {best_epoch}).",
-                            detail=reason_detail, tr_nu=tr_nu, te_nu=te_nu,
-                            cnt=self.df_counter, patience=self.df_patience, best_epoch=self.best_epoch))
-                    if self.df_counter >= self.df_patience:
-                        self.early_stop = True
-                        self.stop_reason = _(
-                            "Student-t degrees-of-freedom divergence exceeded threshold ({detail}) for {cnt} consecutive checks.",
-                            detail=reason_detail, cnt=self.df_counter
-                        )
-                        return
-                else:
+                if in_base_training:
                     self.is_overfitting_df = False
                     self.df_counter = 0
-                    print(_("  [EarlyStop DF] Student-t within bounds: {d_nu_key}={d_nu:.2f} <= {limit:.2f} (tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}).",
-                            d_nu_key=d_nu_key, d_nu=d_nu, limit=self.d_nu_limit, tr_nu=tr_nu, te_nu=te_nu))
+                    print(_("  [EarlyStop Base] Epoch {epoch_i} < min_epochs ({min_epochs}) or scale={sc:.2f} > 3.0: early stopping disarmed during initial convergence.",
+                            epoch_i=epoch_i, min_epochs=self.min_epochs, sc=float(tr_sc) if np.isfinite(tr_sc) else 0.0))
+                else:
+                    df_violated = (d_nu > self.d_nu_limit) or (te_nu < self.min_te_nu)
+                    if df_violated:
+                        self.is_overfitting_df = True
+                        self.df_counter += 1
+                        reason_detail = (
+                            f"{d_nu_key}={d_nu:.2f} > {self.d_nu_limit:.2f}"
+                            if d_nu > self.d_nu_limit
+                            else f"{te_nu_key}={te_nu:.2f} < {self.min_te_nu:.2f}"
+                        )
+                        print(_("  [EarlyStop DF] Student-t overfitting threshold exceeded ({detail}, tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). DF counter: {cnt}/{patience} (best weights locked at epoch {best_epoch}).",
+                                detail=reason_detail, tr_nu=tr_nu, te_nu=te_nu,
+                                cnt=self.df_counter, patience=self.df_patience, best_epoch=self.best_epoch))
+                        if self.df_counter >= self.df_patience:
+                            self.early_stop = True
+                            self.stop_reason = _(
+                                "Student-t degrees-of-freedom divergence exceeded threshold ({detail}) for {cnt} consecutive checks.",
+                                detail=reason_detail, cnt=self.df_counter
+                            )
+                            return
+                    else:
+                        self.is_overfitting_df = False
+                        self.df_counter = 0
+                        print(_("  [EarlyStop DF] Student-t within bounds: {d_nu_key}={d_nu:.2f} <= {limit:.2f} (tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}).",
+                                d_nu_key=d_nu_key, d_nu=d_nu, limit=self.d_nu_limit, tr_nu=tr_nu, te_nu=te_nu))
 
         # 2. Update best model weights and evaluate patience on the target metric
         if self.best_loss is None:
@@ -594,13 +659,16 @@ class EarlyStopping:
                 print(_("  [EarlyStop] {metric_name} = {target_val:.4f}, but weights NOT updated due to d_nu overfitting (kept epoch {best_epoch} with {metric_name} = {best_loss:.4f}).",
                         metric_name=self.metric_name, target_val=target_val, best_epoch=self.best_epoch, best_loss=self.best_loss))
         else:
-            self.counter += 1
-            print(_("  [EarlyStop] No improvement in {metric_name} ({target_val:.4f}). Counter: {cnt}/{patience}. Best ({best_loss:.4f}) at epoch {best_epoch}",
-                    metric_name=self.metric_name, target_val=target_val, cnt=self.counter, patience=self.patience,
-                    best_loss=self.best_loss, best_epoch=self.best_epoch))
-            if self.counter >= self.patience:
-                self.early_stop = True
-                self.stop_reason = _(
-                    "{metric_name} did not improve for the last {epochs} epochs.",
-                    metric_name=self.metric_name, epochs=self.patience * 5
-                )
+            if in_base_training:
+                self.counter = 0
+            else:
+                self.counter += 1
+                print(_("  [EarlyStop] No improvement in {metric_name} ({target_val:.4f}). Counter: {cnt}/{patience}. Best ({best_loss:.4f}) at epoch {best_epoch}",
+                        metric_name=self.metric_name, target_val=target_val, cnt=self.counter, patience=self.patience,
+                        best_loss=self.best_loss, best_epoch=self.best_epoch))
+                if self.counter >= self.patience:
+                    self.early_stop = True
+                    self.stop_reason = _(
+                        "{metric_name} did not improve for the last {epochs} epochs.",
+                        metric_name=self.metric_name, epochs=self.patience * 5
+                    )

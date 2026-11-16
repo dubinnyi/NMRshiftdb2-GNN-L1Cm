@@ -49,6 +49,8 @@ RU_MESSAGES = {
         "Явный шаг обучения (learning rate). По умолчанию: warmup=1e-4, molcalib=3e-5",
     "Allowed per-stage increase in Student-t df divergence (df_train - df_test). Default: 0.42 (two-stage cap <= 0.84)":
         "Допустимый прирост разницы степеней свободы Стьюдента (df_train - df_test) на один этап (по умолчанию: 0.42, суммарно за два этапа <= 0.84)",
+    "Minimum number of base training epochs before early stopping is armed (default: warmup=50, molcalib=20)":
+        "Минимальное число эпох базового обучения до включения критериев остановки (по умолчанию: warmup=50, molcalib=20)",
     "WARNING: Unrecognized command-line argument: '{arg}'":
         "WARNING: Нераспознанный аргумент командной строки: '{arg}'",
     "ERROR: Stage 'molcalib' requires a pre-trained checkpoint path via --weights <path> or --checkpoint <path> (or use --protocol auto for the full warmup -> molcalib cycle).":
@@ -75,6 +77,10 @@ RU_MESSAGES = {
         "[SMOKE TEST] Все временные чекпоинты, CSV, графики и логи TensorBoard удалены.\n",
 
     # === graph_conv_many_nuc_util.py: training runner & EarlyStopping ===
+    "  [Warning] Skipped {skipped} batches with non-finite loss in epoch {epoch_i}.":
+        "  [Внимание] Пропущено {skipped} батчей с неконечным Loss на эпохе {epoch_i}.",
+    "\n[WARNING] Non-finite weights/loss at epoch {epoch_i}! Restoring last valid weights, reducing lr to {lr:.2e}, and continuing training.":
+        "\n[ВНИМАНИЕ] Неконечные веса/Loss на эпохе {epoch_i}! Откат к последним валидным весам, снижение lr до {lr:.2e} и продолжение обучения.",
     "\n[ERROR] NaN/Inf detected in Train Loss at epoch {epoch_i}! Aborting training and restoring best weights.":
         "\n[ОШИБКА] Обнаружен NaN/Inf в Train Loss на эпохе {epoch_i}! Прерывание обучения и откат к лучшим весам.",
     "\n--- EARLY STOPPING TRIGGERED at epoch {epoch_i} ---":
@@ -83,10 +89,14 @@ RU_MESSAGES = {
         "Причина: {reason}",
     "Restoring best model weights (epoch {best_epoch}, {metric_name}: {best_loss:.4f}) before finishing stage.":
         "Восстановление лучших весов модели (эпоха {best_epoch}, {metric_name}: {best_loss:.4f}) перед завершением этапа.",
+    "  [EarlyStop] WARNING: Val Loss = {val_loss} (NaN/Inf) at epoch {epoch_i}! Ignoring invalid validation step.":
+        "  [EarlyStop] ВНИМАНИЕ: Val Loss = {val_loss} (NaN/Inf) на эпохе {epoch_i}! Пропуск невалидной проверки.",
     "  [EarlyStop] WARNING: Val Loss = {val_loss} (NaN/Inf)! Stopping training.":
         "  [EarlyStop] ВНИМАНИЕ: Val Loss = {val_loss} (NaN/Inf)! Остановка обучения.",
     "NaN/Inf in validation Loss at epoch {epoch_i}":
         "NaN/Inf в валидационном Loss на эпохе {epoch_i}",
+    "  [EarlyStop Base] Epoch {epoch_i} < min_epochs ({min_epochs}) or scale={sc:.2f} > 3.0: early stopping disarmed during initial convergence.":
+        "  [EarlyStop База] Эпоха {epoch_i} < min_epochs ({min_epochs}) или scale={sc:.2f} > 3.0: критерии остановки отключены на время начальной сходимости.",
     "  [EarlyStop DF] Initial divergence {d_nu_key} = {d_nu:.2f} (tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). Stage '{stage}' threshold: {limit:.2f}":
         "  [EarlyStop DF] Начальное расхождение {d_nu_key} = {d_nu:.2f} (tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). Порог остановки этапа '{stage}': {limit:.2f}",
     "  [EarlyStop DF] Student-t overfitting threshold exceeded ({detail}, tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). DF counter: {cnt}/{patience} (best weights locked at epoch {best_epoch}).":

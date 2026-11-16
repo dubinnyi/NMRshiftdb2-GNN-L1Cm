@@ -66,8 +66,10 @@ def analyze_and_plot_z(z_values, title_prefix, axes, n_atoms=None, n_mols=None, 
 
     ax_hist, ax_cdf = axes
 
-    ax_hist.hist(z_values, bins=200, range=(-8, 8), density=True, alpha=0.5, color='gray',
-                 label=_("Data (z)"))
+    in_range = (z_values >= -8) & (z_values <= 8)
+    if np.any(in_range):
+        ax_hist.hist(z_values[in_range], bins=200, range=(-8, 8), density=True, alpha=0.5, color='gray',
+                     label=_("Data (z)"))
     ax_hist.plot(x, pdf_t, 'b-', lw=2,
                  label=_("Student-t\n(df={nu:.2f}, loc={loc:.4f}, scale={scale:.4f})",
                          nu=nu, loc=loc, scale=scale))
@@ -314,7 +316,7 @@ def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
     z_train, sig_train, cm_train, n_atoms_tr, n_mols_tr, std_reg_real = process_predictions(
         res_train, std_reg, apply_cm, spect_set
     )
-    z_test, sig_test, cm_test, n_atoms_te, n_mols_te, _ = process_predictions(
+    z_test, sig_test, cm_test, n_atoms_te, n_mols_te, _unused_std_reg = process_predictions(
         res_test, std_reg, apply_cm, spect_set
     )
 
