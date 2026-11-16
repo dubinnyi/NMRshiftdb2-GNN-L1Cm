@@ -716,12 +716,11 @@ class NormUncertainLoss(nn.Module):
         self.std_scale = std_scale
 
     def __call__(self, pred, y,  mask):
-        # === ДОБАВЛЕНО: ПРИНУДИТЕЛЬНЫЙ ПЕРЕХОД В FP32 ===
+        # Force FP32 precision for numerical stability under AMP autocast
         mu = pred['mu'].float() 
         std = pred['std'].float()
         y = y.float()
         mask = mask.float()
-        # ================================================
 
         if self.use_log1p:
             log = torch.log1p
@@ -744,7 +743,7 @@ class NormUncertainLoss(nn.Module):
 class NormUncertainCalibrationLoss(nn.Module):
     """
     Masked uncertainty loss with per-molecule calibration shift (c_m)
-    and L1 or L2 penalty (in ppm) to anchor the absolute scale.
+    and L1 or L2 penalty (in ppm) to anchor the absolute chemical shift scale.
     """
     def __init__(self, 
                  mu_scale = torch.Tensor([1.0]), 
@@ -760,7 +759,7 @@ class NormUncertainCalibrationLoss(nn.Module):
         self.cm_norm = cm_norm.upper()
 
     def forward(self, pred, y, mask):
-        # === ПРИНУДИТЕЛЬНЫЙ ПЕРЕХОД В FP32 ДЛЯ СТАБИЛЬНОСТИ ===
+        # Force FP32 precision for numerical stability under AMP autocast
         mu  = pred['mu'].float() 
         std = pred['std'].float()
         y = y.float()
@@ -776,27 +775,27 @@ class NormUncertainCalibrationLoss(nn.Module):
         std_scaled = std / std_scale
 
         variance = std_scaled ** 2
-        # Отвязываем дисперсию в весах w, чтобы сеть не манипулировала std ради уменьшения штрафа c_m
+        # Detach variance in inverse-variance weights w so the network does not inflate std to reduce c_m penalty
         w = mask / variance.detach()
         delta = y_scaled - mu_scaled
         
         sum_w = w.sum(dim=1, keepdim=True)
         sum_w_clamped = torch.clamp(sum_w, min=1e-9)
         
-        # Weighted shift c_m в масштабе mu_scale (градиенты по mu включены)
+        # Inverse-variance weighted per-molecule shift c_m in mu_scale units (with gradients wrt mu enabled)
         c_m = (delta * w).sum(dim=1, keepdim=True) / sum_w_clamped
         c_m = c_m * (sum_w > 0).float()
         
-        # Для расчета NLL используем отвязанный c_m
+        # Use detached c_m when evaluating the NLL term
         mu_calib = mu_scaled + c_m.detach()
         
-        # Element-wise NLL (без логарифма, в соответствии с авторским log_normal_nolog)
+        # Element-wise pseudo-NLL (without log, matching the original log_normal_nolog formulation)
         element_wise = - (y_scaled - mu_calib)**2 / (2 * variance) - std_scaled
         
         log_pdf = element_wise * mask
         nll_loss = -log_pdf.sum() / torch.clamp(mask.sum(), min=1.0)
         
-        # Переводим c_m обратно в физические единицы (ppm) для прозрачной L1/L2 регуляризации
+        # Convert c_m back to physical units (ppm) for transparent L1/L2 regularization
         c_m_ppm = c_m * mu_scale
         active_mols = (sum_w > 0).float()
         if self.cm_norm == "L1":

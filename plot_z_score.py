@@ -15,13 +15,14 @@ from glob import glob
 import graph_conv_many_nuc_util
 from graph_conv_many_nuc_util import PredModel
 import nets
+from i18n import _
 
 
 def epoch_res_to_df(res, tgt_nucs):
     """
-    Быстрое преобразование словаря выходов run_epoch(..., return_pred=True)
-    в DataFrame формата PredModel.pred (колонки: pred_mu, pred_std, nuc_i, nuc, atom_idx, m_pos, value).
-    Работает мгновенно через векторные индексы numpy без повторного прогона молекул.
+    Fast vectorized conversion of `run_epoch(..., return_pred=True)` dictionary output
+    into a DataFrame matching `PredModel.pred` format (columns: pred_mu, pred_std,
+    nuc_i, nuc, atom_idx, m_pos, value).
     """
     pred_mu = res['pred_mu']
     pred_std = res['pred_std']
@@ -50,7 +51,8 @@ def epoch_res_to_df(res, tgt_nucs):
 def analyze_and_plot_z(z_values, title_prefix, axes, n_atoms=None, n_mols=None, filename=""):
     z_values = z_values[np.isfinite(z_values)]
     if len(z_values) < 2:
-        print(f"[{title_prefix}] ПРЕДУПРЕЖДЕНИЕ: Массив z-score пуст (возможно, веса модели содержат NaN). Пропуск отрисовки.")
+        print(_("[{title_prefix}] WARNING: z-score array is empty (model weights may contain NaN). Skipping plot.",
+                title_prefix=title_prefix))
         return
 
     nu, loc, scale = stats.t.fit(z_values)
@@ -64,15 +66,25 @@ def analyze_and_plot_z(z_values, title_prefix, axes, n_atoms=None, n_mols=None, 
 
     ax_hist, ax_cdf = axes
 
-    ax_hist.hist(z_values, bins=200, range=(-8, 8), density=True, alpha=0.5, color='gray', label='Данные (z)')
-    ax_hist.plot(x, pdf_t, 'b-', lw=2, label=f't-Стьюдент\n(df={nu:.2f}, loc={loc:.4f}, scale={scale:.4f})')
-    ax_hist.plot(x, pdf_norm, 'r--', lw=2, label='Идеал: N(0,1)')
+    ax_hist.hist(z_values, bins=200, range=(-8, 8), density=True, alpha=0.5, color='gray',
+                 label=_("Data (z)"))
+    ax_hist.plot(x, pdf_t, 'b-', lw=2,
+                 label=_("Student-t\n(df={nu:.2f}, loc={loc:.4f}, scale={scale:.4f})",
+                         nu=nu, loc=loc, scale=scale))
+    ax_hist.plot(x, pdf_norm, 'r--', lw=2, label=_("Ideal: N(0,1)"))
 
-    counts_str = f" ({n_atoms} атомов, {n_mols} молекул)" if (n_atoms is not None and n_mols is not None) else ""
+    counts_str = (
+        _(" ({n_atoms} atoms, {n_mols} molecules)", n_atoms=n_atoms, n_mols=n_mols)
+        if (n_atoms is not None and n_mols is not None) else ""
+    )
     prefix_str = f"{filename}\n" if filename else ""
-    ax_hist.set_title(f"{prefix_str}{title_prefix}: Гистограмма z-score{counts_str}", fontsize=10)
+    ax_hist.set_title(
+        _("{prefix_str}{title_prefix}: Z-score Histogram{counts_str}",
+          prefix_str=prefix_str, title_prefix=title_prefix, counts_str=counts_str),
+        fontsize=10
+    )
     ax_hist.set_xlabel('z = (y - mu) / sigma')
-    ax_hist.set_ylabel('Плотность вероятности')
+    ax_hist.set_ylabel(_("Probability Density"))
     ax_hist.set_xlim(-8, 8)
     ax_hist.grid(alpha=0.3)
     ax_hist.legend(loc='upper right')
@@ -81,12 +93,12 @@ def analyze_and_plot_z(z_values, title_prefix, axes, n_atoms=None, n_mols=None, 
     y_ecdf = np.arange(1, len(x_sort) + 1) / len(x_sort)
     mask = (x_sort >= -8) & (x_sort <= 8)
 
-    ax_cdf.plot(x_sort[mask], y_ecdf[mask], color='gray', lw=2, label='Эмпирическая CDF')
-    ax_cdf.plot(x, cdf_t, 'b-', lw=2, label='t-Стьюдент CDF')
-    ax_cdf.plot(x, cdf_norm, 'r--', lw=2, label='Идеал: N(0,1) CDF')
-    ax_cdf.set_title(f'{title_prefix}: Интегральное распределение', fontsize=10)
+    ax_cdf.plot(x_sort[mask], y_ecdf[mask], color='gray', lw=2, label=_("Empirical CDF"))
+    ax_cdf.plot(x, cdf_t, 'b-', lw=2, label=_("Student-t CDF"))
+    ax_cdf.plot(x, cdf_norm, 'r--', lw=2, label=_("Ideal: N(0,1) CDF"))
+    ax_cdf.set_title(_("{title_prefix}: Cumulative Distribution (CDF)", title_prefix=title_prefix), fontsize=10)
     ax_cdf.set_xlabel('z = (y - mu) / sigma')
-    ax_cdf.set_ylabel('Вероятность (P(X < z))')
+    ax_cdf.set_ylabel(_("Probability (P(X < z))"))
     ax_cdf.set_xlim(-8, 8)
     ax_cdf.grid(alpha=0.3)
     ax_cdf.legend(loc='lower right')
@@ -108,9 +120,13 @@ def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg, filename=""):
     ax_sigma.axvline(std_reg, color='black', linestyle='dotted', linewidth=2, label=f'Min Reg: {std_reg:.3f}')
 
     prefix_str = f"{filename}\n" if filename else ""
-    ax_sigma.set_title(f'{prefix_str}{title_prefix}: Распределение Sigma [ppm]', fontsize=10)
-    ax_sigma.set_xlabel('Предсказанная ошибка (sigma) [ppm]')
-    ax_sigma.set_ylabel('Частота (атомы)')
+    ax_sigma.set_title(
+        _("{prefix_str}{title_prefix}: Sigma Distribution [ppm]",
+          prefix_str=prefix_str, title_prefix=title_prefix),
+        fontsize=10
+    )
+    ax_sigma.set_xlabel(_("Predicted Uncertainty (sigma) [ppm]"))
+    ax_sigma.set_ylabel(_("Frequency (atoms)"))
     ax_sigma.grid(alpha=0.3)
     ax_sigma.legend(loc='upper right')
 
@@ -123,9 +139,12 @@ def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg, filename=""):
     std_cm = np.std(filtered_cm) if len(filtered_cm) > 0 else 0.0
 
     ax_cm.axvline(mean_cm, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {mean_cm:.3f}')
-    ax_cm.set_title(f'{title_prefix}: Сдвиг молекулы (C_m) [ppm] [1-99 перцентиль]', fontsize=10)
+    ax_cm.set_title(
+        _("{title_prefix}: Per-Molecule Shift (C_m) [ppm] [1-99 percentile]", title_prefix=title_prefix),
+        fontsize=10
+    )
     ax_cm.set_xlabel('C_m [ppm]')
-    ax_cm.set_ylabel('Частота (молекулы)')
+    ax_cm.set_ylabel(_("Frequency (molecules)"))
     ax_cm.text(0.05, 0.95, f'Std: {std_cm:.3f}', transform=ax_cm.transAxes,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     ax_cm.grid(alpha=0.3)
@@ -134,8 +153,8 @@ def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg, filename=""):
 
 def process_predictions(res_df, std_reg, apply_cm, spect_set='13C'):
     """
-    Переводит предсказания неопределенности в реальные ppm (с учетом mu_scale / std_scale для 1H)
-    и вычисляет калибровочные сдвиги C_m и Z-score.
+    Convert predicted uncertainty values into physical ppm units (accounting for
+    mu_scale / std_scale for 1H) and compute per-molecule calibration shifts C_m and Z-scores.
     """
     if spect_set == '1H':
         mu_scale = 0.05
@@ -175,11 +194,10 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
                                      cm_norm="L2", lambda_penalty=0.0,
                                      metrics_csv_path=None):
     """
-    Вычисляет подробные метрики мониторинга обучения (MAE до и после калибровки C_m,
-    NLL без логарифма log_normal_nolog, штраф за C_m, статистику Sigma и C_m,
-    параметры распределения Стьюдента nu, loc, scale для raw и calibrated Z-score,
-    а также разницу степеней свободы d_nu и отношение масштабов ratio_sc)
-    и дописывает одну строку в накопительный CSV-файл каждые 10 эпох.
+    Compute comprehensive training monitoring metrics (MAE before and after C_m calibration,
+    pseudo-NLL log_normal_nolog, C_m penalty, Sigma and C_m statistics, Student-t parameters
+    nu, loc, scale for raw and calibrated Z-scores, df divergence d_nu, and scale ratio ratio_sc)
+    and append a summary row to the cumulative CSV file every 10 epochs.
     """
     if spect_set == '1H':
         mu_scale = 0.05
@@ -224,7 +242,7 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
         else:
             nu_cal, loc_cal, sc_cal = np.nan, np.nan, np.nan
 
-        # Расчет NLL точно по формуле авторского log_normal_nolog:
+        # Evaluate pseudo-NLL matching the original log_normal_nolog formulation:
         # element_wise = (y_sc - mu_sc)^2 / (2 * std_sc^2) + std_sc
         y_sc = df['value'].astype(np.float64) / mu_scale
         mu_raw_sc = df['pred_mu'].astype(np.float64) / mu_scale
@@ -278,10 +296,11 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
         row_df = pd.DataFrame([row])
         write_header = not os.path.exists(metrics_csv_path)
         row_df.to_csv(metrics_csv_path, mode='a', header=write_header, index=False, float_format='%.6f')
-        print(f"  [Metrics Ep {epoch_i:04d}] Записана строка метрик в: {metrics_csv_path} "
-              f"(te_mae_cal={row.get('te_mae_cal', float('nan')):.4f}, "
-              f"d_nu_cal={row.get('d_nu_cal', float('nan')):.2f}, "
-              f"ratio_sc_cal={row.get('ratio_sc_cal', float('nan')):.2f})")
+        print(_("  [Metrics Ep {epoch_i:04d}] Appended metrics row to: {path} (te_mae_cal={te_mae_cal:.4f}, d_nu_cal={d_nu_cal:.2f}, ratio_sc_cal={ratio_sc_cal:.2f})",
+                epoch_i=epoch_i, path=metrics_csv_path,
+                te_mae_cal=row.get('te_mae_cal', float('nan')),
+                d_nu_cal=row.get('d_nu_cal', float('nan')),
+                ratio_sc_cal=row.get('ratio_sc_cal', float('nan'))))
 
     return row
 
@@ -289,8 +308,8 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
 def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
                          out_file_z, out_file_stats, title_label=""):
     """
-    Строит и сохраняет графики Z-score и статистики (Sigma, C_m) напрямую из таблиц DataFrame
-    (или загруженных из CSV), не требуя наличия файлов модели (.state / .model).
+    Build and save Z-score and statistics (Sigma, C_m) figures directly from DataFrames
+    without requiring model checkpoint files (.state / .model).
     """
     z_train, sig_train, cm_train, n_atoms_tr, n_mols_tr, std_reg_real = process_predictions(
         res_train, std_reg, apply_cm, spect_set
@@ -300,7 +319,7 @@ def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
     )
 
     if len(z_train) < 2 or len(z_test) < 2:
-        print(f"  [Plot] Пропуск сохранения графиков {out_file_z}: недостаточно валидных данных (возможно, NaN).")
+        print(_("  [Plot] Skipping plot save {path}: insufficient valid data (possible NaN).", path=out_file_z))
         return
 
     os.makedirs(os.path.dirname(os.path.abspath(out_file_z)), exist_ok=True)
@@ -312,7 +331,7 @@ def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
     plt.tight_layout()
     fig_z.savefig(out_file_z, dpi=300)
     plt.close(fig_z)
-    print(f"Графики Z-score сохранены в: '{out_file_z}'")
+    print(_("Z-score plots saved to: '{path}'", path=out_file_z))
 
     fig_s, axes_s = plt.subplots(2, 2, figsize=(14, 10))
     plot_stats(sig_train, cm_train, "Train", axes_s[:, 0], std_reg_real, title_label)
@@ -320,7 +339,7 @@ def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
     plt.tight_layout()
     fig_s.savefig(out_file_stats, dpi=300)
     plt.close(fig_s)
-    print(f"Графики статистики сохранены в: '{out_file_stats}'")
+    print(_("Statistics plots saved to: '{path}'", path=out_file_stats))
 
 
 def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
@@ -328,12 +347,12 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
                             spect_set, plots_dir=None, use_cuda=True,
                             test_res=None, cm_norm="L2", lambda_penalty=0.0):
     """
-    Вызывается в конце каждой N-й эпохи пайплайна обучения (например, каждые 10 эпох):
-    1) Вычисляет предсказания для train и test в памяти (без сохранения тяжелых .state/.model);
-    2) Сохраняет легкие CSV-файлы предсказаний (*_preds_train.csv и *_preds_test.csv);
-    3) Записывает сводную строку всех метрик и параметров Стьюдента в <checkpoint_prefix>_metrics.csv;
-    4) Строит и сохраняет графики Z-score и распределений Sigma / C_m.
-    Возвращает словарь вычисленных метрик (metrics_row) для использования в критерии остановки.
+    Called at the end of every N-th training epoch (e.g. every 10 epochs):
+    1) Evaluates train and test predictions in memory (without saving heavy .state/.model files);
+    2) Saves lightweight prediction CSV files (*_preds_train.csv and *_preds_test.csv);
+    3) Appends a summary row of metrics and Student-t parameters to <checkpoint_prefix>_metrics.csv;
+    4) Generates and saves Z-score and Sigma / C_m distribution plots.
+    Returns the computed metrics dictionary (metrics_row) for use in EarlyStopping.
     """
     epoch_str = f"{epoch_i:08d}"
     base_with_epoch = f"{checkpoint_prefix}.{epoch_str}"
@@ -365,7 +384,8 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
     os.makedirs(os.path.dirname(os.path.abspath(csv_train_path)), exist_ok=True)
     res_train_df.to_csv(csv_train_path, index=False)
     res_test_df.to_csv(csv_test_path, index=False)
-    print(f"  [Plot/CSV Ep {epoch_i:04d}] Сохранены CSV: {csv_train_path}, {csv_test_path}")
+    print(_("  [Plot/CSV Ep {epoch_i:04d}] Saved CSVs: {train_path}, {test_path}",
+            epoch_i=epoch_i, train_path=csv_train_path, test_path=csv_test_path))
 
     metrics_row = compute_and_append_epoch_metrics(
         res_train_df, res_test_df,
@@ -421,8 +441,8 @@ def find_meta_file(input_path, explicit_meta=""):
 
 def resolve_csv_pair(input_path):
     """
-    Если передан путь к одному из CSV или базовому префиксу без .state/.model,
-    находит пару (csv_train, csv_test).
+    Given a path to one of the prediction CSVs or a checkpoint prefix,
+    resolve the corresponding (csv_train, csv_test) pair.
     """
     if input_path.endswith('_preds_train.csv'):
         return input_path, input_path[:-len('_preds_train.csv')] + '_preds_test.csv'
@@ -442,7 +462,7 @@ def resolve_csv_pair(input_path):
 
 def load_model_for_eval(state_path, meta):
     """
-    Загружает модель из .state (state_dict) или .model (полный объект).
+    Load a model from a .state (state_dict) or .model (serialized module) file.
     """
     obj = torch.load(state_path, map_location='cpu', weights_only=False)
     if isinstance(obj, torch.nn.DataParallel):
@@ -460,7 +480,7 @@ def load_model_for_eval(state_path, meta):
         net = nets.GraphVertModel(**net_params)
         net.load_state_dict(cleaned_state_dict, strict=True)
     else:
-        raise ValueError(f"Неизвестный тип объекта в {state_path}: {type(obj)}")
+        raise ValueError(_("Unknown object type in {path}: {obj_type}", path=state_path, obj_type=type(obj)))
 
     if torch.cuda.is_available():
         net = net.cuda()
@@ -474,7 +494,7 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
     meta_file = find_meta_file(state_or_csv_path, meta_path)
     meta = None
     if meta_file is not None:
-        print(f"Загрузка метаданных: {meta_file}")
+        print(_("Loading metadata: {path}", path=meta_file))
         if meta_file.endswith('.json'):
             meta = json.load(open(meta_file, 'r'))
         else:
@@ -504,12 +524,14 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
         protocol = 'warmup'
 
     apply_cm = (protocol == 'molcalib')
-    print(f"Ядро: {spect_set} | Протокол: {protocol} (вычитание C_m={'ДА' if apply_cm else 'НЕТ'}) | std_reg={std_reg}")
+    apply_str = _("YES") if apply_cm else _("NO")
+    print(_("Nucleus: {spect_set} | Protocol: {protocol} (subtract C_m={apply_str}) | std_reg={std_reg}",
+            spect_set=spect_set, protocol=protocol, apply_str=apply_str, std_reg=std_reg))
 
     csv_train_path, csv_test_path = resolve_csv_pair(state_or_csv_path)
 
     if os.path.exists(csv_train_path) and os.path.exists(csv_test_path) and not force_recalc:
-        print(f"Найдены готовые CSV-файлы предсказаний (расчет по модели не требуется):")
+        print(_("Found existing prediction CSV files (model evaluation not required):"))
         print(f"  Train CSV: {csv_train_path}")
         print(f"  Test  CSV: {csv_test_path}")
         res_train = pd.read_csv(csv_train_path)
@@ -517,11 +539,13 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
     else:
         if not os.path.exists(state_or_csv_path):
             raise FileNotFoundError(
-                f"Не найдены ни CSV-файлы ({csv_train_path}), ни файл весов модели ({state_or_csv_path})."
+                _("Neither prediction CSV files ({csv_path}) nor model weights file ({state_path}) were found.",
+                  csv_path=csv_train_path, state_path=state_or_csv_path)
             )
         if meta is None:
             raise FileNotFoundError(
-                f"Для расчета предсказаний из весов модели ({state_or_csv_path}) необходим .meta или .json файл."
+                _("A .meta or .json file is required to compute predictions from model weights ({state_path}).",
+                  state_path=state_or_csv_path)
             )
 
         infile = infile_override if infile_override else meta['infile']
@@ -530,9 +554,9 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
             if os.path.exists(local_infile):
                 infile = local_infile
             else:
-                raise FileNotFoundError(f"Не найден файл датасета: {infile}")
+                raise FileNotFoundError(_("Dataset file not found: {path}", path=infile))
 
-        print(f"Чтение исходного датасета: {infile}")
+        print(_("Reading source dataset: {path}", path=infile))
         dataset_hparams = meta['dataset_hparams']
         ds_train, ds_test = graph_conv_many_nuc_util.make_datasets(
             {'filename': infile}, dataset_hparams, min_atoms=5
@@ -540,19 +564,19 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
         dl_train_eval = torch.utils.data.DataLoader(ds_train, batch_size=64, shuffle=False, num_workers=4)
         dl_test_eval = torch.utils.data.DataLoader(ds_test, batch_size=64, shuffle=False, num_workers=4)
 
-        print(f"Инициализация модели из чекпоинта: {state_or_csv_path}")
+        print(_("Initializing model from checkpoint: {path}", path=state_or_csv_path))
         net = load_model_for_eval(state_or_csv_path, meta)
         use_cuda = torch.cuda.is_available()
 
         with torch.no_grad():
-            print("Вычисление предсказаний для тренировочной выборки...")
+            print(_("Computing predictions for training set..."))
             train_eval_res = graph_conv_many_nuc_util.run_epoch(
                 net, None, None, dl_train_eval,
                 pred_only=True, USE_CUDA=use_cuda,
                 return_pred=True, desc='predict_train',
                 progress_bar=True
             )
-            print("Вычисление предсказаний для тестовой выборки...")
+            print(_("Computing predictions for test set..."))
             test_eval_res = graph_conv_many_nuc_util.run_epoch(
                 net, None, None, dl_test_eval,
                 pred_only=True, USE_CUDA=use_cuda,
@@ -563,7 +587,8 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
         res_train = epoch_res_to_df(train_eval_res, tgt_nucs)
         res_test = epoch_res_to_df(test_eval_res, tgt_nucs)
 
-        print(f"Сохранение результатов в {csv_train_path} и {csv_test_path}...")
+        print(_("Saving results to {train_path} and {test_path}...",
+                train_path=csv_train_path, test_path=csv_test_path))
         res_train.to_csv(csv_train_path, index=False)
         res_test.to_csv(csv_test_path, index=False)
 
@@ -596,21 +621,23 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Отрисовка Z-score и распределений Sigma/C_m по чекпоинту или CSV")
+    parser = argparse.ArgumentParser(
+        description=_("Plot Z-score and Sigma/C_m distributions from a checkpoint or prediction CSV")
+    )
     parser.add_argument("--state", type=str, required=True,
-                        help="Путь к файлу модели (.state/.model) ИЛИ к CSV-файлу предсказаний (*_preds_train.csv)")
+                        help=_("Path to model file (.state/.model) OR prediction CSV file (*_preds_train.csv)"))
     parser.add_argument("--meta", type=str, default="",
-                        help="Путь к .meta или .json файлу (необязательно, определяется автоматически)")
+                        help=_("Path to .meta or .json file (optional, auto-detected if omitted)"))
     parser.add_argument("--infile", type=str, default="",
-                        help="Путь к .pickle датасету (требуется только если нет готовых CSV)")
+                        help=_("Path to .pickle dataset file (required only when prediction CSVs are absent)"))
     parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default="",
-                        help="Явное указание протокола (если не указано, определяется из метаданных или имени файла)")
+                        help=_("Explicit protocol override (if omitted, inferred from metadata or filename)"))
     parser.add_argument("--min_error", type=float, default=None,
-                        help="Явное указание std_regularize (по умолчанию берется из метаданных)")
+                        help=_("Explicit std_regularize override (defaults to value in metadata)"))
     parser.add_argument("--out_dir", type=str, default="plots_{NUC}",
-                        help="Папка для сохранения графиков (по умолчанию: plots_13C или plots_1H)")
+                        help=_("Output directory for plots (default: plots_13C or plots_1H)"))
     parser.add_argument("--force_recalc", action="store_true",
-                        help="Принудительно пересчитать предсказания по модели даже при наличии CSV")
+                        help=_("Force recomputation of predictions from the model even if CSVs exist"))
     args = parser.parse_args()
 
     run_standalone_plot(

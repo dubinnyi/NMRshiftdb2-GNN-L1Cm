@@ -4,52 +4,57 @@ import os
 import pickle
 import json
 import nets
+from i18n import _
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Конвертация 13C state для инициализации 1H модели (Partial Transfer Learning)")
-    parser.add_argument("--state_13c", type=str, required=True, 
-                        help="Путь к готовому .state файлу обученной модели 13C")
-    parser.add_argument("--meta_13c", type=str, required=True, 
-                        help="Путь к .meta или .json файлу от 13C (архитектуры экстрактора идентичны)")
-    parser.add_argument("--output", type=str, required=True, 
-                        help="Путь для сохранения нового .state файла, готового для запуска 1H")
-    
+    parser = argparse.ArgumentParser(
+        description=_("Convert 13C state to initialize 1H model (Partial Transfer Learning)")
+    )
+    parser.add_argument("--state_13c", type=str, required=True,
+                        help=_("Path to trained 13C .state file"))
+    parser.add_argument("--meta_13c", type=str, required=True,
+                        help=_("Path to 13C .meta or .json file (feature extractor architectures are identical)"))
+    parser.add_argument("--output", type=str, required=True,
+                        help=_("Output path for the new .state file ready for 1H training"))
+
     args = parser.parse_args()
 
-    # 1. Загружаем метаданные от 13C. 
-    # Архитектура экстрактора фичей (gml) у них идентична, а количество выходных ядер (OUT_DIM=1) тоже совпадает.
-    print(f"Загрузка метаданных 13C из {args.meta_13c}...")
+    # 1. Load 13C metadata.
+    # The graph feature extractor (gml) architecture and output dimension (OUT_DIM=1) are identical.
+    print(_("Loading 13C metadata from {path}...", path=args.meta_13c))
     if args.meta_13c.endswith('.json'):
         with open(args.meta_13c, 'r') as f:
             meta = json.load(f)
     else:
         with open(args.meta_13c, 'rb') as f:
             meta = pickle.load(f)
-            
+
     net_params = meta['net_params']
 
-    # 2. Создаем чистую модель с правильной нулевой/случайной инициализацией весов/смещений.
-    # Это сгенерирует свежие веса для финальных слоев (lin_out), чтобы сеть не была смещена к значениям 13C.
+    # 2. Instantiate a fresh model with clean random weight/bias initialization.
+    # This generates fresh weights for the final readout layers (lin_out) so predictions are not biased toward 13C shifts.
     net_new = nets.GraphVertModel(**net_params)
     state_new = net_new.state_dict()
 
-    # 3. Загружаем обученные веса 13C модели (weights_only=True убирает ворнинг/ошибку безопасности)
-    print(f"Загрузка весов 13C из {args.state_13c}...")
+    # 3. Load pre-trained 13C model weights.
+    print(_("Loading 13C weights from {path}...", path=args.state_13c))
     state_13c = torch.load(args.state_13c, map_location='cpu', weights_only=True)
 
-    # 4. Переносим ТОЛЬКО веса графовых сверточных слоев (gml.*) и батч-нормализации на входе
+    # 4. Transfer ONLY the graph convolutional layers (gml.*) and input batch normalization parameters.
     transferred_count = 0
     for k in state_new.keys():
         if (k.startswith('gml.') or k.startswith('batch_norm.')) and k in state_13c:
             state_new[k] = state_13c[k]
             transferred_count += 1
 
-    print(f"Успешно перенесено слоев графового экстрактора (gml.*): {transferred_count}")
+    print(_("Successfully transferred graph feature extractor layers (gml.*): {count}", count=transferred_count))
 
-    # 5. Сохраняем новый комбинированный state-файл
+    # 5. Save the combined state dictionary.
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     torch.save(state_new, args.output)
-    print(f"Готово! Новый state сохранен в: {args.output}")
+    print(_("Done! New state saved to: {path}", path=args.output))
+
 
 if __name__ == "__main__":
     main()
