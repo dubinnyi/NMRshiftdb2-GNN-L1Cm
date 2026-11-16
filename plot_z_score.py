@@ -170,6 +170,122 @@ def process_predictions(res_df, std_reg, apply_cm, spect_set='13C'):
     return z_clean, sigma_clean, cm_clean, n_atoms, n_mols, std_reg_real
 
 
+def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
+                                     std_reg, protocol, spect_set,
+                                     cm_norm="L2", lambda_penalty=0.0,
+                                     metrics_csv_path=None):
+    """
+    Вычисляет подробные метрики мониторинга обучения (MAE до и после калибровки C_m,
+    NLL без логарифма log_normal_nolog, штраф за C_m, статистику Sigma и C_m,
+    параметры распределения Стьюдента nu, loc, scale для raw и calibrated Z-score,
+    а также разницу степеней свободы d_nu и отношение масштабов ratio_sc)
+    и дописывает одну строку в накопительный CSV-файл каждые 10 эпох.
+    """
+    if spect_set == '1H':
+        mu_scale = 0.05
+        std_scale = 10.0
+    else:
+        mu_scale = 1.0
+        std_scale = 1.0
+
+    row = {
+        'epoch': int(epoch_i),
+        'protocol': protocol,
+        'cm_norm': cm_norm,
+        'lambda_penalty': float(lambda_penalty),
+    }
+
+    for tag, df in [('tr', res_train_df), ('te', res_test_df)]:
+        if len(df) == 0:
+            continue
+        std_real = (df['pred_std'] + std_reg) * (mu_scale / std_scale)
+        delta_raw = df['value'] - df['pred_mu']
+        w = 1.0 / (std_real ** 2)
+
+        df_tmp = pd.DataFrame({
+            'm_pos': df['m_pos'],
+            'wd': delta_raw * w,
+            'w': w,
+        })
+        cm_per_mol = df_tmp.groupby('m_pos')['wd'].sum() / df_tmp.groupby('m_pos')['w'].sum()
+        atom_cm = df['m_pos'].map(cm_per_mol)
+        delta_cal = delta_raw - atom_cm
+
+        z_raw = (delta_raw / std_real).replace([np.inf, -np.inf], np.nan).dropna().values
+        z_cal = (delta_cal / std_real).replace([np.inf, -np.inf], np.nan).dropna().values
+
+        if len(z_raw) >= 2:
+            nu_raw, loc_raw, sc_raw = stats.t.fit(z_raw)
+        else:
+            nu_raw, loc_raw, sc_raw = np.nan, np.nan, np.nan
+
+        if len(z_cal) >= 2:
+            nu_cal, loc_cal, sc_cal = stats.t.fit(z_cal)
+        else:
+            nu_cal, loc_cal, sc_cal = np.nan, np.nan, np.nan
+
+        # Расчет NLL точно по формуле авторского log_normal_nolog:
+        # element_wise = (y_sc - mu_sc)^2 / (2 * std_sc^2) + std_sc
+        y_sc = df['value'] / mu_scale
+        mu_raw_sc = df['pred_mu'] / mu_scale
+        mu_cal_sc = (df['pred_mu'] + atom_cm) / mu_scale
+        std_sc = (df['pred_std'] + std_reg) / std_scale
+
+        nll_raw = float(((y_sc - mu_raw_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
+        nll_cal = float(((y_sc - mu_cal_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
+
+        cm_vals = cm_per_mol.dropna().values
+        if str(cm_norm).upper() == 'L1':
+            cm_norm_val = float(np.mean(np.abs(cm_vals))) if len(cm_vals) > 0 else 0.0
+        else:
+            cm_norm_val = float(np.mean(cm_vals ** 2)) if len(cm_vals) > 0 else 0.0
+
+        pen_weighted = float(lambda_penalty) * cm_norm_val
+        tot_loss = (nll_cal + pen_weighted) if protocol == 'molcalib' else nll_raw
+
+        if len(cm_vals) > 1:
+            q_low, q_high = np.percentile(cm_vals, [1, 99])
+            cm_vals_99 = cm_vals[(cm_vals >= q_low) & (cm_vals <= q_high)]
+            cm_std_99 = float(np.std(cm_vals_99)) if len(cm_vals_99) > 0 else np.nan
+        else:
+            cm_std_99 = float(np.std(cm_vals)) if len(cm_vals) > 0 else np.nan
+
+        row[f'{tag}_mae'] = float(np.mean(np.abs(delta_raw)))
+        row[f'{tag}_mae_cal'] = float(np.mean(np.abs(delta_cal)))
+        row[f'{tag}_nll_raw'] = nll_raw
+        row[f'{tag}_nll_cal'] = nll_cal
+        row[f'{tag}_pen'] = pen_weighted
+        row[f'{tag}_tot_loss'] = tot_loss
+        row[f'{tag}_std_mean'] = float(np.mean(std_real))
+        row[f'{tag}_cm_mean'] = float(np.mean(cm_vals)) if len(cm_vals) > 0 else np.nan
+        row[f'{tag}_cm_std'] = float(np.std(cm_vals)) if len(cm_vals) > 0 else np.nan
+        row[f'{tag}_cm_std_99'] = cm_std_99
+        row[f'{tag}_nu_raw'] = float(nu_raw)
+        row[f'{tag}_loc_raw'] = float(loc_raw)
+        row[f'{tag}_sc_raw'] = float(sc_raw)
+        row[f'{tag}_nu_cal'] = float(nu_cal)
+        row[f'{tag}_loc_cal'] = float(loc_cal)
+        row[f'{tag}_sc_cal'] = float(sc_cal)
+
+    row['d_nu_cal'] = row.get('tr_nu_cal', np.nan) - row.get('te_nu_cal', np.nan)
+    row['d_nu_raw'] = row.get('tr_nu_raw', np.nan) - row.get('te_nu_raw', np.nan)
+    tr_sc_cal = row.get('tr_sc_cal', np.nan)
+    te_sc_cal = row.get('te_sc_cal', np.nan)
+    row['ratio_sc_cal'] = (te_sc_cal / tr_sc_cal) if (tr_sc_cal and np.isfinite(tr_sc_cal) and tr_sc_cal != 0) else np.nan
+
+    if metrics_csv_path:
+        os.makedirs(os.path.dirname(os.path.abspath(metrics_csv_path)), exist_ok=True)
+        row_df = pd.DataFrame([row])
+        write_header = not os.path.exists(metrics_csv_path)
+        row_df.to_csv(metrics_csv_path, mode='a', header=write_header, index=False, float_format='%.6f')
+        print(f"  [Metrics Ep {epoch_i:04d}] Записана строка метрик в: {metrics_csv_path} "
+              f"(te_mae_cal={row.get('te_mae_cal', float('nan')):.4f}, "
+              f"d_nu_cal={row.get('d_nu_cal', float('nan')):.2f}, "
+              f"ratio_sc_cal={row.get('ratio_sc_cal', float('nan')):.2f})")
+
+    return row
+
+
 def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
                          out_file_z, out_file_stats, title_label=""):
     """
@@ -210,17 +326,19 @@ def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
 def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
                             checkpoint_prefix, epoch_i, std_reg, protocol,
                             spect_set, plots_dir=None, use_cuda=True,
-                            test_res=None):
+                            test_res=None, cm_norm="L2", lambda_penalty=0.0):
     """
     Вызывается в конце каждой N-й эпохи пайплайна обучения (например, каждые 10 эпох):
     1) Вычисляет предсказания для train и test в памяти (без сохранения тяжелых .state/.model);
     2) Сохраняет легкие CSV-файлы предсказаний (*_preds_train.csv и *_preds_test.csv);
-    3) Строит и сохраняет графики Z-score и распределений Sigma / C_m.
+    3) Записывает сводную строку всех метрик и параметров Стьюдента в <checkpoint_prefix>_metrics.csv;
+    4) Строит и сохраняет графики Z-score и распределений Sigma / C_m.
     """
     epoch_str = f"{epoch_i:08d}"
     base_with_epoch = f"{checkpoint_prefix}.{epoch_str}"
     csv_train_path = f"{base_with_epoch}_preds_train.csv"
     csv_test_path = f"{base_with_epoch}_preds_test.csv"
+    metrics_csv_path = f"{checkpoint_prefix}_metrics.csv"
 
     net.eval()
     with torch.no_grad():
@@ -247,6 +365,17 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
     res_train_df.to_csv(csv_train_path, index=False)
     res_test_df.to_csv(csv_test_path, index=False)
     print(f"  [Plot/CSV Ep {epoch_i:04d}] Сохранены CSV: {csv_train_path}, {csv_test_path}")
+
+    compute_and_append_epoch_metrics(
+        res_train_df, res_test_df,
+        epoch_i=epoch_i,
+        std_reg=std_reg,
+        protocol=protocol,
+        spect_set=spect_set,
+        cm_norm=cm_norm,
+        lambda_penalty=lambda_penalty,
+        metrics_csv_path=metrics_csv_path
+    )
 
     if plots_dir is None:
         plots_dir = f"plots_{spect_set}"

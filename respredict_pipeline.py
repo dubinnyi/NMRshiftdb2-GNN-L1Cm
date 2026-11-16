@@ -53,6 +53,8 @@ cm_group.add_argument("--L2Cm", action="store_true",
                       help="Использовать L2-штраф C_m^2 (в ppm^2) для калибровки в molcalib (по умолчанию)")
 parser.add_argument("--lambda_penalty", type=float, default=None,
                     help="Явный вес штрафа LAMBDA_PENALTY (если не указан, выбирается автоматически под норму и ядро)")
+parser.add_argument("--lr", type=float, default=None,
+                    help="Явный шаг обучения (learning rate). По умолчанию: warmup=1e-4, molcalib=3e-5")
 args, unknown = parser.parse_known_args()
 
 # Поддержка передачи аргументов в формате key=value без дефисов (например, checkpoint=... stage=... nuc=...)
@@ -74,6 +76,8 @@ for u in unknown:
             args.min_error = float(v)
         elif k == "lambda_penalty":
             args.lambda_penalty = float(v)
+        elif k == "lr":
+            args.lr = float(v)
     elif u not in ("--",):
         print(f"WARNING: Нераспознанный аргумент командной строки: '{u}'")
 
@@ -113,17 +117,17 @@ if args.min_error is not None:
 tgt_max_n = 64 
 MIN_ATOMS = 5
 
-# Автоматический выбор сбалансированного веса штрафа LAMBDA_PENALTY (для C_m в ppm),
-# если он не задан явно через --lambda_penalty:
-# - Для 13C (характерный сдвиг |C_m| ~ 0.8 ppm, nll_loss ~ 4.4): L1 -> 0.5, L2 -> 0.5
-# - Для 1H  (характерный сдвиг |C_m| ~ 0.14 ppm, nll_loss ~ 31.0): L1 -> 20.0, L2 -> 100.0
+# Автоматический выбор мягкого веса штрафа LAMBDA_PENALTY (для C_m в ppm),
+# удерживающего глобальный нуль шкалы без заучивания экспериментального разброса C_m:
+# - Для 13C (характерный сдвиг |C_m| ~ 0.8 ppm, nll_loss ~ 4.0): L1 -> 0.1, L2 -> 0.2
+# - Для 1H  (характерный сдвиг |C_m| ~ 0.12 ppm, nll_loss ~ 4.0): L1 -> 1.0, L2 -> 5.0
 if args.lambda_penalty is not None:
     LAMBDA_PENALTY = args.lambda_penalty
 else:
     if SPECT_SET == '13C':
-        LAMBDA_PENALTY = 0.5 if CM_NORM == "L1" else 0.5
+        LAMBDA_PENALTY = 0.1 if CM_NORM == "L1" else 0.2
     else:
-        LAMBDA_PENALTY = 20.0 if CM_NORM == "L1" else 100.0
+        LAMBDA_PENALTY = 1.0 if CM_NORM == "L1" else 5.0
 
 EXP_NAME = f"good_{SPECT_SET}"
 
@@ -303,16 +307,16 @@ def train(infile, outfile, seed):
 
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
-            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}) ===")
-            opt_params['lr'] = 1e-5
+            opt_params['lr'] = args.lr if args.lr is not None else 3e-5
+            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}) ===")
             criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
                                                           std_regularize=loss_config['std_regularize'],
                                                           lambda_penalty=LAMBDA_PENALTY,
                                                           cm_norm=CM_NORM)
 
         else: # warmup
-            print("=== RUNNING STAGE: WARMUP (STANDARD) ===")
-            opt_params['lr'] = 1e-4
+            opt_params['lr'] = args.lr if args.lr is not None else 1e-4
+            print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}) ===")
             criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
                                                std_regularize=loss_config['std_regularize'])
             stage_max_epochs = 300
@@ -337,9 +341,10 @@ def train(infile, outfile, seed):
         checkpoint_base_prefix = os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME)
         checkpoint_filename = checkpoint_base_prefix + ".{epoch_i:08d}"
         print("Checkpoint template:", checkpoint_filename)
+        print("Metrics CSV file:   ", f"{checkpoint_base_prefix}_metrics.csv")
         checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
 
-        # Колбэк для выгрузки CSV и отрисовки графиков каждые 10 эпох (без сохранения тяжелых .state/.model)
+        # Колбэк для выгрузки CSV, записи строки метрик и отрисовки графиков каждые 10 эпох (без сохранения тяжелых .state/.model)
         def plot_every_10_epochs(epoch_i, net, test_res=None,
                                  _prefix=checkpoint_base_prefix, _stage=stage_protocol):
             if epoch_i % 10 != 0:
@@ -356,7 +361,9 @@ def train(infile, outfile, seed):
                 spect_set=SPECT_SET,
                 plots_dir=f"plots_{SPECT_SET}",
                 use_cuda=USE_CUDA,
-                test_res=None
+                test_res=None,
+                cm_norm=CM_NORM,
+                lambda_penalty=LAMBDA_PENALTY if _stage == 'molcalib' else 0.0
             )
 
         writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
@@ -387,7 +394,8 @@ def train(infile, outfile, seed):
         best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
         best_model_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.model")
 
-        # Если ранее была применена обертка DataParallel для нескольких GPU,\n        # нужно сохранять внутренний модуль (net.module), а не саму обертку.
+        # Если ранее была применена обертка DataParallel для нескольких GPU,
+        # нужно сохранять внутренний модуль (net.module), а не саму обертку.
         if isinstance(net, torch.nn.DataParallel):
             torch.save(net.module.state_dict(), best_state_path)
             torch.save(net.module, best_model_path)
