@@ -32,13 +32,13 @@ def epoch_res_to_df(res, tgt_nucs):
     for nuc_i, nuc in enumerate(tgt_nucs):
         m_pos_idx, atom_idx = np.where(pred_mask[:, :, nuc_i] > 0)
         df_nuc = pd.DataFrame({
-            'pred_mu': pred_mu[m_pos_idx, atom_idx, nuc_i],
-            'pred_std': pred_std[m_pos_idx, atom_idx, nuc_i],
+            'pred_mu': pred_mu[m_pos_idx, atom_idx, nuc_i].astype(np.float64),
+            'pred_std': pred_std[m_pos_idx, atom_idx, nuc_i].astype(np.float64),
             'nuc_i': nuc_i,
             'nuc': nuc,
             'atom_idx': atom_idx,
             'm_pos': m_pos_idx,
-            'value': pred_truth[m_pos_idx, atom_idx, nuc_i],
+            'value': pred_truth[m_pos_idx, atom_idx, nuc_i].astype(np.float64),
         })
         dfs.append(df_nuc)
 
@@ -144,13 +144,13 @@ def process_predictions(res_df, std_reg, apply_cm, spect_set='13C'):
         mu_scale = 1.0
         std_scale = 1.0
 
-    pred_mu_real = res_df['pred_mu']
-    pred_std_real = (res_df['pred_std'] + std_reg) * (mu_scale / std_scale)
+    pred_mu_real = res_df['pred_mu'].astype(np.float64)
+    pred_std_real = (res_df['pred_std'].astype(np.float64) + std_reg) * (mu_scale / std_scale)
     std_reg_real = std_reg * (mu_scale / std_scale)
 
     res_df = res_df.copy()
     res_df['w'] = 1.0 / (pred_std_real ** 2)
-    delta = res_df['value'] - pred_mu_real
+    delta = res_df['value'].astype(np.float64) - pred_mu_real
     res_df['weighted_delta'] = delta * res_df['w']
     c_m_series = res_df.groupby('m_pos')['weighted_delta'].sum() / res_df.groupby('m_pos')['w'].sum()
     res_df['computed_c_m'] = res_df['m_pos'].map(c_m_series)
@@ -158,7 +158,7 @@ def process_predictions(res_df, std_reg, apply_cm, spect_set='13C'):
     c_m_to_apply = res_df['computed_c_m'] if apply_cm else 0.0
 
     res_df['calib_mu'] = pred_mu_real + c_m_to_apply
-    res_df['z'] = (res_df['value'] - res_df['calib_mu']) / pred_std_real
+    res_df['z'] = (res_df['value'].astype(np.float64) - res_df['calib_mu']) / pred_std_real
 
     z_clean = res_df['z'].replace([np.inf, -np.inf], np.nan).dropna().values
     sigma_clean = pred_std_real.dropna().values
@@ -198,8 +198,8 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
     for tag, df in [('tr', res_train_df), ('te', res_test_df)]:
         if len(df) == 0:
             continue
-        std_real = (df['pred_std'] + std_reg) * (mu_scale / std_scale)
-        delta_raw = df['value'] - df['pred_mu']
+        std_real = (df['pred_std'].astype(np.float64) + std_reg) * (mu_scale / std_scale)
+        delta_raw = df['value'].astype(np.float64) - df['pred_mu'].astype(np.float64)
         w = 1.0 / (std_real ** 2)
 
         df_tmp = pd.DataFrame({
@@ -226,10 +226,10 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
 
         # Расчет NLL точно по формуле авторского log_normal_nolog:
         # element_wise = (y_sc - mu_sc)^2 / (2 * std_sc^2) + std_sc
-        y_sc = df['value'] / mu_scale
-        mu_raw_sc = df['pred_mu'] / mu_scale
-        mu_cal_sc = (df['pred_mu'] + atom_cm) / mu_scale
-        std_sc = (df['pred_std'] + std_reg) / std_scale
+        y_sc = df['value'].astype(np.float64) / mu_scale
+        mu_raw_sc = df['pred_mu'].astype(np.float64) / mu_scale
+        mu_cal_sc = (df['pred_mu'].astype(np.float64) + atom_cm) / mu_scale
+        std_sc = (df['pred_std'].astype(np.float64) + std_reg) / std_scale
 
         nll_raw = float(((y_sc - mu_raw_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
         nll_cal = float(((y_sc - mu_cal_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
@@ -333,6 +333,7 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
     2) Сохраняет легкие CSV-файлы предсказаний (*_preds_train.csv и *_preds_test.csv);
     3) Записывает сводную строку всех метрик и параметров Стьюдента в <checkpoint_prefix>_metrics.csv;
     4) Строит и сохраняет графики Z-score и распределений Sigma / C_m.
+    Возвращает словарь вычисленных метрик (metrics_row) для использования в критерии остановки.
     """
     epoch_str = f"{epoch_i:08d}"
     base_with_epoch = f"{checkpoint_prefix}.{epoch_str}"
@@ -366,7 +367,7 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
     res_test_df.to_csv(csv_test_path, index=False)
     print(f"  [Plot/CSV Ep {epoch_i:04d}] Сохранены CSV: {csv_train_path}, {csv_test_path}")
 
-    compute_and_append_epoch_metrics(
+    metrics_row = compute_and_append_epoch_metrics(
         res_train_df, res_test_df,
         epoch_i=epoch_i,
         std_reg=std_reg,
@@ -394,6 +395,8 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
         out_file_z=out_file_z, out_file_stats=out_file_stats,
         title_label=f"{stage_model_name}.{epoch_str}"
     )
+
+    return metrics_row
 
 
 def find_meta_file(input_path, explicit_meta=""):

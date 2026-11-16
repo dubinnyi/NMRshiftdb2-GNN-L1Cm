@@ -155,11 +155,11 @@ def run_epoch(net, optimizer, criterion, dl,
                 accum_pred_val = {}
                 if isinstance(res, dict):
                     for k, v in res.items():
-                        accum_pred_val[k] = res[k].cpu().detach().numpy()
+                        accum_pred_val[k] = res[k].float().cpu().detach().numpy()
                 else:
-                    accum_pred_val['res'] = res.cpu().detach().numpy()
-                accum_pred_val['mask'] = mask.cpu().detach().numpy()
-                accum_pred_val['truth'] = vals.cpu().detach().numpy()
+                    accum_pred_val['res'] = res.float().cpu().detach().numpy()
+                accum_pred_val['mask'] = mask.float().cpu().detach().numpy()
+                accum_pred_val['truth'] = vals.float().cpu().detach().numpy()
 
                 accum_pred.append(accum_pred_val)
 
@@ -228,15 +228,27 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    USE_CUDA=True, use_std=False, 
                    writer=None, validate_func = None, 
                    checkpoint_func = None,
-                   plot_func = None):
+                   plot_func = None,
+                   stage='warmup',
+                   max_d_nu=0.42,
+                   df_patience=2,
+                   min_te_nu=2.0):
 
     # === ИНИЦИАЛИЗАЦИЯ GradScaler ===
     scaler = torch.amp.GradScaler('cuda', enabled=USE_CUDA)
 
-    # === ИНИЦИАЛИЗАЦИЯ РАННЕЙ ОСТАНОВКИ ===
-    # patience=20 означает 20 проверок подряд (т.е. 100 эпох, так как проверка каждые 5 эпох)
-    early_stopping = EarlyStopping(patience=20, min_delta=1e-4)
-
+    # === ИНИЦИАЛИЗАЦИЯ РАННЕЙ ОСТАНОВКИ (с учетом расхождения df Стьюдента d_nu) ===
+    # patience=20 означает 20 проверок подряд по 5 эпох (100 эпох) по целевой метрике;
+    # max_d_nu=0.42 задает допустимый прирост разницы степеней свободы Стьюдента (df_train - df_test)
+    # на один этап, так что после двух этапов (warmup -> molcalib) суммарная разница не превысит ~0.84 (< 1.0).
+    early_stopping = EarlyStopping(
+        patience=20,
+        min_delta=1e-4,
+        stage=stage,
+        max_d_nu=max_d_nu,
+        df_patience=df_patience,
+        min_te_nu=min_te_nu
+    )
 
     for epoch_i in tqdm(range(MAX_EPOCHS)):
 
@@ -259,6 +271,8 @@ def generic_runner(net, optimizer, scheduler, criterion,
             writer.add_scalar("train_loss_nll", train_res['running_nll']/train_res['total_points'], epoch_i)
             writer.add_scalar("train_c_m_sq_penalty", train_res['running_penalty']/train_res['total_points'], epoch_i)
 
+        test_res = None
+        val_metrics = {}
         if epoch_i % 5 == 0:
             net.eval()
             with torch.no_grad():
@@ -266,20 +280,35 @@ def generic_runner(net, optimizer, scheduler, criterion,
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
 
+            if validate_func is not None:
+                val_metrics = validate_func(test_res)
+                if writer is not None:
+                    for metric_name, metric_val in val_metrics.items():
+                        if np.isfinite(metric_val):
+                            writer.add_scalar(metric_name, metric_val, epoch_i)
 
-            # --- ЛОГИКА РАННЕЙ ОСТАНОВКИ ---
-            test_loss = float(test_res['running_loss'] / test_res['total_points'])
-            early_stopping(test_loss, net)  # <--- ПЕРЕДАЕМ NET
-        
-            for metric_name, metric_val in validate_func(test_res).items():
-                if np.isfinite(metric_val):
-                    writer.add_scalar(metric_name, metric_val, epoch_i)
-            
         if checkpoint_func is not None:
             checkpoint_func(epoch_i = epoch_i, net =net, optimizer=optimizer)
 
+        metrics_row = None
         if plot_func is not None:
-            plot_func(epoch_i = epoch_i, net = net)
+            metrics_row = plot_func(epoch_i = epoch_i, net = net, test_res = test_res)
+
+        if epoch_i % 5 == 0 and test_res is not None:
+            test_loss = float(test_res['running_loss'] / test_res['total_points'])
+            # На этапе molcalib в качестве целевой метрики качества для выбора лучшего чекпоинта
+            # используем калиброванную ошибку паттерна (te_mae_cal / test_pattern_abs_err),
+            # так как NLL на тесте искусственно растет при сжатии sigma на тренировочной выборке.
+            pattern_err_vals = [v for k, v in val_metrics.items() if k.endswith('/test_pattern_abs_err')]
+            val_pattern_mae = float(pattern_err_vals[0]) if len(pattern_err_vals) > 0 else None
+
+            early_stopping(
+                val_loss=test_loss,
+                model=net,
+                epoch_i=epoch_i,
+                val_pattern_mae=val_pattern_mae,
+                metrics_row=metrics_row
+            )
 
         if scheduler is not None:
             scheduler.step()
@@ -287,12 +316,13 @@ def generic_runner(net, optimizer, scheduler, criterion,
         # Проверка флага ранней остановки в конце эпохи
         if early_stopping.early_stop:
             print(f"\n--- ОБУЧЕНИЕ ОСТАНОВЛЕНО ДОСРОЧНО на эпохе {epoch_i} ---")
-            print(f"Валидационный Loss не улучшался последние {early_stopping.patience * 5} эпох.")
+            print(f"Причина: {early_stopping.stop_reason}")
             break
             
     # === ВОССТАНОВЛЕНИЕ ЛУЧШИХ ВЕСОВ В КОНЦЕ ЦИКЛА ===
     if early_stopping.best_state is not None:
-        print(f"Восстановление лучших весов модели (Loss: {early_stopping.best_loss:.4f}) перед завершением этапа.")
+        print(f"Восстановление лучших весов модели (эпоха {early_stopping.best_epoch}, "
+              f"{early_stopping.metric_name}: {early_stopping.best_loss:.4f}) перед завершением этапа.")
         net.load_state_dict(early_stopping.best_state)
 
 
@@ -437,36 +467,134 @@ def create_uncertain_validate_func(tgt_nucs):
     return val_func
 
 
-
 class EarlyStopping:
     """
-    Ранняя остановка с автоматическим восстановлением лучших весов модели.
+    Ранняя остановка с контролем:
+    1) Расхождения степеней свободы Стьюдента d_nu = df_train - df_test
+       (на этапе warmup порог = max_d_nu = 0.42; на этапе molcalib к стартовому d_nu_0
+       добавляется бюджет +max_d_nu с верхним пределом 2 * max_d_nu = 0.84 < 1.0);
+    2) Минимально допустимого числа степеней свободы на тесте (te_nu >= min_te_nu = 2.0,
+       чтобы дисперсия распределения ошибок на тесте оставалась конечной);
+    3) Целевой метрики качества (для warmup - Test NLL Loss, для molcalib - калиброванный Test MAE_cal),
+       причем лучшие веса best_state обновляются только внутри допустимого коридора d_nu <= limit.
     """
-    def __init__(self, patience=20, min_delta=1e-4):
+    def __init__(self, patience=20, min_delta=1e-4, stage='warmup',
+                 max_d_nu=0.42, df_patience=2, min_te_nu=2.0):
         self.patience = patience
         self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
-        self.best_state = None  # <--- Хранилище для лучших весов
+        self.stage = stage
+        self.max_d_nu = max_d_nu
+        self.df_patience = df_patience
+        self.min_te_nu = min_te_nu
 
-    def __call__(self, val_loss, model): # <--- Теперь принимает саму модель
+        self.counter = 0
+        self.df_counter = 0
+        self.best_loss = None
+        self.best_epoch = 0
+        self.early_stop = False
+        self.stop_reason = ""
+        self.best_state = None
+        self.initial_d_nu = None
+        self.d_nu_limit = max_d_nu if stage == 'warmup' else (2.0 * max_d_nu)
+        self.is_overfitting_df = False
+        self.metric_name = "Test MAE_cal" if stage == 'molcalib' else "Test Loss"
+
+    def __call__(self, val_loss, model, epoch_i=0, val_pattern_mae=None, metrics_row=None):
         if not np.isfinite(val_loss):
             self.counter += 1
             print(f"  [EarlyStop] ВНИМАНИЕ: Val Loss = {val_loss} (NaN/Inf)! Остановка обучения.")
             self.early_stop = True
+            self.stop_reason = f"NaN/Inf в валидационном Loss на эпохе {epoch_i}"
             return
 
+        # Выбираем целевую метрику для отслеживания лучшей модели:
+        # - на warmup: val_loss (NLL)
+        # - на molcalib: te_mae_cal (из metrics_row на кратных 10 эпохах) или val_pattern_mae
+        if self.stage == 'molcalib':
+            if metrics_row is not None and np.isfinite(metrics_row.get('te_mae_cal', np.nan)):
+                target_val = float(metrics_row['te_mae_cal'])
+            elif val_pattern_mae is not None and np.isfinite(val_pattern_mae):
+                target_val = float(val_pattern_mae)
+            else:
+                target_val = val_loss
+        else:
+            target_val = val_loss
+
+        # 1. Проверка расхождения степеней свободы Стьюдента (d_nu = tr_nu - te_nu) каждые 10 эпох.
+        # Учитываем только сформировавшееся распределение Стьюдента (tr_nu < 20 и te_nu < 20),
+        # чтобы на 0-й эпохе warmup белый шум инициализации (nu ~ 1000) не давал ложного срабатывания.
+        if metrics_row is not None and self.max_d_nu is not None and self.max_d_nu > 0:
+            d_nu_key = 'd_nu_cal' if self.stage == 'molcalib' else 'd_nu_raw'
+            tr_nu_key = 'tr_nu_cal' if self.stage == 'molcalib' else 'tr_nu_raw'
+            te_nu_key = 'te_nu_cal' if self.stage == 'molcalib' else 'te_nu_raw'
+
+            d_nu = metrics_row.get(d_nu_key, np.nan)
+            tr_nu = metrics_row.get(tr_nu_key, np.nan)
+            te_nu = metrics_row.get(te_nu_key, np.nan)
+
+            if np.isfinite(d_nu) and np.isfinite(tr_nu) and np.isfinite(te_nu) and tr_nu < 20.0 and te_nu < 20.0:
+                if self.initial_d_nu is None:
+                    self.initial_d_nu = max(0.0, float(d_nu))
+                    if self.stage == 'molcalib':
+                        # На втором этапе (molcalib) прибавляем бюджет max_d_nu к стартовому d_nu_0,
+                        # но ограничиваем сверху величиной 2 * max_d_nu (чтобы суммарно было < 1.0 df).
+                        # Если же стартовый чекпоинт уже имел высокое расхождение, даем минимальный зазор 0.5 * max_d_nu.
+                        two_stage_cap = 2.0 * self.max_d_nu
+                        if self.initial_d_nu < two_stage_cap - 0.10:
+                            self.d_nu_limit = min(self.initial_d_nu + self.max_d_nu, two_stage_cap)
+                        else:
+                            self.d_nu_limit = self.initial_d_nu + 0.5 * self.max_d_nu
+                    else:
+                        self.d_nu_limit = self.max_d_nu
+                    print(f"  [EarlyStop DF] Начальное расхождение {d_nu_key} = {d_nu:.2f} "
+                          f"(tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). Порог остановки этапа '{self.stage}': {self.d_nu_limit:.2f}")
+
+                df_violated = (d_nu > self.d_nu_limit) or (te_nu < self.min_te_nu)
+                if df_violated:
+                    self.is_overfitting_df = True
+                    self.df_counter += 1
+                    reason_detail = (
+                        f"{d_nu_key}={d_nu:.2f} > {self.d_nu_limit:.2f}"
+                        if d_nu > self.d_nu_limit
+                        else f"{te_nu_key}={te_nu:.2f} < {self.min_te_nu:.2f}"
+                    )
+                    print(f"  [EarlyStop DF] Превышен порог переобучения Стьюдента ({reason_detail}, "
+                          f"tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}). "
+                          f"Счетчик DF: {self.df_counter}/{self.df_patience} (лучшие веса зафиксированы на эпохе {self.best_epoch}).")
+                    if self.df_counter >= self.df_patience:
+                        self.early_stop = True
+                        self.stop_reason = (
+                            f"Расхождение степеней свободы Стьюдента превысило порог ({reason_detail}) "
+                            f"{self.df_counter} проверки подряд."
+                        )
+                        return
+                else:
+                    self.is_overfitting_df = False
+                    self.df_counter = 0
+                    print(f"  [EarlyStop DF] Норма Стьюдента: {d_nu_key}={d_nu:.2f} <= {self.d_nu_limit:.2f} "
+                          f"(tr_nu={tr_nu:.2f}, te_nu={te_nu:.2f}).")
+
+        # 2. Обновление лучших весов и проверка терпения по целевой метрике
         if self.best_loss is None:
-            self.best_loss = val_loss
+            self.best_loss = target_val
+            self.best_epoch = epoch_i
             self.best_state = copy.deepcopy(model.state_dict())
-        elif val_loss > self.best_loss - self.min_delta:
+            print(f"  [EarlyStop] Инициализация на эпохе {epoch_i}: {self.metric_name} = {self.best_loss:.4f}")
+        elif target_val < self.best_loss - self.min_delta:
+            if not self.is_overfitting_df:
+                print(f"  [EarlyStop] Улучшение на эпохе {epoch_i}! {self.metric_name} снизился с {self.best_loss:.4f} до {target_val:.4f}")
+                self.best_loss = target_val
+                self.best_epoch = epoch_i
+                self.best_state = copy.deepcopy(model.state_dict())
+                self.counter = 0
+            else:
+                self.counter += 1
+                print(f"  [EarlyStop] {self.metric_name} = {target_val:.4f}, но веса НЕ обновлены из-за переобучения по d_nu "
+                      f"(сохранена эпоха {self.best_epoch} с {self.metric_name} = {self.best_loss:.4f}).")
+        else:
             self.counter += 1
-            print(f"  [EarlyStop] Нет улучшений. Счетчик: {self.counter}/{self.patience}. Лучший Loss: {self.best_loss:.4f}")
+            print(f"  [EarlyStop] Нет улучшений {self.metric_name} ({target_val:.4f}). "
+                  f"Счетчик: {self.counter}/{self.patience}. Лучший ({self.best_loss:.4f}) на эпохе {self.best_epoch}")
             if self.counter >= self.patience:
                 self.early_stop = True
-        else:
-            print(f"  [EarlyStop] Улучшение! Loss снизился с {self.best_loss:.4f} до {val_loss:.4f}")
-            self.best_loss = val_loss
-            self.best_state = copy.deepcopy(model.state_dict()) # <--- Сохраняем слепок лучших весов
-            self.counter = 0
+                self.stop_reason = f"{self.metric_name} не улучшался последние {self.patience * 5} эпох."

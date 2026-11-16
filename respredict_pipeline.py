@@ -55,6 +55,8 @@ parser.add_argument("--lambda_penalty", type=float, default=None,
                     help="Явный вес штрафа LAMBDA_PENALTY (если не указан, выбирается автоматически под норму и ядро)")
 parser.add_argument("--lr", type=float, default=None,
                     help="Явный шаг обучения (learning rate). По умолчанию: warmup=1e-4, molcalib=3e-5")
+parser.add_argument("--max_d_nu", type=float, default=0.42,
+                    help="Допустимый прирост разницы степеней свободы Стьюдента (df_train - df_test) на один этап (по умолчанию: 0.42, суммарно за два этапа <= 0.84)")
 args, unknown = parser.parse_known_args()
 
 # Поддержка передачи аргументов в формате key=value без дефисов (например, checkpoint=... stage=... nuc=...)
@@ -78,6 +80,8 @@ for u in unknown:
             args.lambda_penalty = float(v)
         elif k == "lr":
             args.lr = float(v)
+        elif k in ("max_d_nu", "d_nu"):
+            args.max_d_nu = float(v)
     elif u not in ("--",):
         print(f"WARNING: Нераспознанный аргумент командной строки: '{u}'")
 
@@ -308,7 +312,7 @@ def train(infile, outfile, seed):
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
             opt_params['lr'] = args.lr if args.lr is not None else 3e-5
-            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}) ===")
+            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}) ===")
             criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
                                                           std_regularize=loss_config['std_regularize'],
                                                           lambda_penalty=LAMBDA_PENALTY,
@@ -316,7 +320,7 @@ def train(infile, outfile, seed):
 
         else: # warmup
             opt_params['lr'] = args.lr if args.lr is not None else 1e-4
-            print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}) ===")
+            print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}) ===")
             criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
                                                std_regularize=loss_config['std_regularize'])
             stage_max_epochs = 300
@@ -348,8 +352,8 @@ def train(infile, outfile, seed):
         def plot_every_10_epochs(epoch_i, net, test_res=None,
                                  _prefix=checkpoint_base_prefix, _stage=stage_protocol):
             if epoch_i % 10 != 0:
-                return
-            plot_z_score.save_csv_and_plot_epoch(
+                return None
+            return plot_z_score.save_csv_and_plot_epoch(
                 net=net,
                 dl_train_eval=dl_train_eval,
                 dl_test_eval=dl_test_eval,
@@ -361,7 +365,7 @@ def train(infile, outfile, seed):
                 spect_set=SPECT_SET,
                 plots_dir=f"plots_{SPECT_SET}",
                 use_cuda=USE_CUDA,
-                test_res=None,
+                test_res=test_res,
                 cm_norm=CM_NORM,
                 lambda_penalty=LAMBDA_PENALTY if _stage == 'molcalib' else 0.0
             )
@@ -387,7 +391,9 @@ def train(infile, outfile, seed):
                                                 USE_CUDA=USE_CUDA, writer=writer, 
                                                 validate_func= validate_func, 
                                                 checkpoint_func= checkpoint_func,
-                                                plot_func=plot_every_10_epochs)
+                                                plot_func=plot_every_10_epochs,
+                                                stage=stage_protocol,
+                                                max_d_nu=args.max_d_nu)
         writer.close()
 
         # После выхода из generic_runner веса сети сохраняются в памяти для следующего этапа.
