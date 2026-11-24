@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+import copy
 import shutil
 from glob import glob
 import json 
@@ -33,12 +34,26 @@ from i18n import _
 
 # === 1. COMMAND-LINE ARGUMENT PARSING ===
 parser = argparse.ArgumentParser(description=_("NMR GNN Training Pipeline"))
+parser.add_argument("--arch", type=str, choices=["v2", "legacy"], default="v2",
+                    help=_("Model architecture: v2 (lightweight Williams-2023 polynomial GNN + 3D RBF + CH2 features + multi-head beta-NLL) or legacy (original GraphVertModel). Default: v2"))
 parser.add_argument("--protocol", "--stage", dest="protocol", type=str, choices=["warmup", "molcalib", "auto"], default=None, 
                     help=_("Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib). Default: warmup for beta_nll, auto for nolog"))
 parser.add_argument("--loss", "--loss_type", dest="loss_type", type=str, choices=["beta_nll", "nolog"], default="beta_nll",
                     help=_("Uncertainty loss function: beta_nll (Seitzer et al., ICLR 2022) or nolog (legacy Jonas & Kuhn). Default: beta_nll"))
 parser.add_argument("--beta", type=float, default=0.5,
                     help=_("Beta exponent in [0, 1] for beta-NLL loss (0=standard NLL, 0.5=default, 1=MSE mean gradient)"))
+parser.add_argument("--mixture_n", type=int, default=5,
+                    help=_("Number of probabilistic bootstrap readout heads in v2 architecture (default: 5)"))
+parser.add_argument("--mixture_obs", type=int, default=4,
+                    help=_("Number of heads trained per molecule in v2 bootstrap subsampling (default: 4)"))
+parser.add_argument("--int_d", type=int, default=256,
+                    help=_("Hidden GNN width for v2 architecture (default: 256, lightweight as in Williams & Jonas 2023)"))
+parser.add_argument("--layer_n", type=int, default=8,
+                    help=_("Number of GNN message-passing layers for v2 architecture (default: 8)"))
+parser.add_argument("--batch_size", type=int, default=None,
+                    help=_("Training batch size (default: 32 for v2, 16 for legacy)"))
+parser.add_argument("--no_3d", action="store_true",
+                    help=_("Disable 3D spatial features in v2 (ablation: pure 2D + rich chemical + CH2 features)"))
 parser.add_argument("--init_std", type=float, default=None,
                     help=_("Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: 13C=5.0, 1H=1.0"))
 parser.add_argument("--max_std", type=float, default=None,
@@ -63,7 +78,7 @@ cm_group.add_argument("--L2Cm", action="store_true",
 parser.add_argument("--lambda_penalty", type=float, default=None,
                     help=_("Explicit LAMBDA_PENALTY weight (if omitted, selected automatically by norm and nucleus)"))
 parser.add_argument("--lr", type=float, default=None,
-                    help=_("Explicit learning rate. Default: warmup=1e-4, molcalib=3e-5"))
+                    help=_("Explicit learning rate. Default: v2=5e-4, legacy warmup=1e-4, molcalib=3e-5"))
 parser.add_argument("--max_d_nu", type=float, default=0.42,
                     help=_("Allowed per-stage increase in Student-t df divergence (df_train - df_test). Default: 0.42 (two-stage cap <= 0.84)"))
 parser.add_argument("--min_epochs", type=int, default=None,
@@ -75,12 +90,24 @@ for u in unknown:
     u_clean = u.lstrip("-")
     if "=" in u_clean:
         k, v = u_clean.split("=", 1)
-        if k in ("protocol", "stage"):
+        if k == "arch":
+            args.arch = v
+        elif k in ("protocol", "stage"):
             args.protocol = v
         elif k in ("loss", "loss_type"):
             args.loss_type = v
         elif k == "beta":
             args.beta = float(v)
+        elif k == "mixture_n":
+            args.mixture_n = int(v)
+        elif k == "mixture_obs":
+            args.mixture_obs = int(v)
+        elif k == "int_d":
+            args.int_d = int(v)
+        elif k == "layer_n":
+            args.layer_n = int(v)
+        elif k == "batch_size":
+            args.batch_size = int(v)
         elif k == "init_std":
             args.init_std = float(v)
         elif k == "max_std":
@@ -106,8 +133,13 @@ for u in unknown:
     elif u not in ("--",):
         print(_("WARNING: Unrecognized command-line argument: '{arg}'", arg=u))
 
+ARCH = args.arch
 LOSS_TYPE = args.loss_type
 BETA = float(args.beta)
+if ARCH == "v2" and LOSS_TYPE != "beta_nll":
+    raise ValueError(
+        _("ERROR: --arch v2 (NMRResPredictV2) requires --loss beta_nll. Use --arch legacy --loss nolog for the original Jonas & Kuhn model.")
+    )
 if LOSS_TYPE == "beta_nll" and not (0.0 <= BETA <= 1.0):
     raise ValueError(_("ERROR: --beta must be in [0.0, 1.0], got {beta}", beta=BETA))
 
@@ -191,11 +223,11 @@ opt_params_base = {'amsgrad' : False,
                    'scheduler_step_size' : 10}
 
 
-def load_pretrained_checkpoint(weights_path, net_params):
+def load_pretrained_checkpoint(weights_path, net_params, net_name="GraphVertModel"):
     """
     Universal loader for checkpoints (.state or .model) created either by the original
-    authors' code or by intermediate/best stage saves.
-    If a companion .json/.meta file exists, synchronizes architecture hyperparameters (e.g. agg_func).
+    authors' code, beta-NLL runs, or NMRResPredictV2 runs.
+    If a companion .json/.meta file exists, synchronizes architecture hyperparameters.
     """
     base = weights_path
     for ext in ['.best.state', '.best.model', '.state', '.model']:
@@ -204,13 +236,17 @@ def load_pretrained_checkpoint(weights_path, net_params):
             break
     base_no_epoch = re.sub(r'\.\d{8}$', '', base)
 
+    detected_net_name = net_name
     for cand in [base_no_epoch + ".json", base + ".json", base_no_epoch + ".meta", base + ".meta"]:
         if os.path.exists(cand):
             try:
                 meta = json.load(open(cand, 'r')) if cand.endswith('.json') else pickle.load(open(cand, 'rb'))
+                if 'net_name' in meta:
+                    detected_net_name = meta['net_name']
                 if 'net_params' in meta:
                     for k in ['int_d', 'layer_n', 'GS', 'agg_func', 'resnet', 'resnet_out', 'resnet_d', 'out_std',
-                              'var_mode', 'init_var', 'min_var', 'max_var']:
+                              'var_mode', 'init_var', 'min_var', 'max_var', 'spatial_dim', 'spatial_hidden',
+                              'mixture_n', 'mixture_num_obs_per', 'dropout', 'resnet_depth']:
                         if k in meta['net_params'] and net_params.get(k) != meta['net_params'][k]:
                             print(_("  [Checkpoint Meta] Updating net_params['{key}']: {old_val} -> {new_val}",
                                     key=k, old_val=net_params.get(k), new_val=meta['net_params'][k]))
@@ -219,7 +255,10 @@ def load_pretrained_checkpoint(weights_path, net_params):
             except Exception as e:
                 print(_("  [Checkpoint Meta] Failed to read {path}: {err}", path=cand, err=e))
 
-    net = nets.GraphVertModel(**net_params)
+    if detected_net_name == "NMRResPredictV2":
+        net = nets.NMRResPredictV2(**net_params)
+    else:
+        net = nets.GraphVertModel(**net_params)
     obj = torch.load(weights_path, map_location='cpu', weights_only=False)
 
     if isinstance(obj, torch.nn.DataParallel):
@@ -278,13 +317,28 @@ def train(infile, outfile, seed):
     # -----------------------------------------------------
     # Configure DataLoaders (filtering by minimum atom count)
     # -----------------------------------------------------
-    BATCH_SIZE = 16
-    dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
+    if ARCH == 'v2':
+        BATCH_SIZE = args.batch_size if args.batch_size is not None else 32
+        dataset_hparams = copy.deepcopy(graph_conv_many_nuc_util.FULL_DATA_HPARAMS)
+        if args.no_3d:
+            dataset_hparams['feat_vect_args']['geom_3d_atom'] = False
+            dataset_hparams['feat_mat_args']['spatial_rbf_centers'] = None
+            dataset_hparams['feat_mat_args']['spatial_inv_r3'] = False
+        return_idx = True
+    else:
+        BATCH_SIZE = args.batch_size if args.batch_size is not None else 16
+        dataset_hparams = graph_conv_many_nuc_util.DEFAULT_DATA_HPARAMS
+        return_idx = False
+
     ds_train, ds_test = graph_conv_many_nuc_util.make_datasets({'filename' : infile}, 
                                                                dataset_hparams, 
-                                                               min_atoms=MIN_ATOMS)
+                                                               min_atoms=MIN_ATOMS,
+                                                               return_idx=return_idx)
 
-    g_feature_n = ds_test[0][1].shape[-1]
+    sample0 = ds_test[0]
+    adj_channels = sample0[0].shape[0]
+    g_feature_n = sample0[1].shape[-1]
+    spatial_dim = 0 if (ARCH != 'v2' or args.no_3d) else sample0[2].shape[-1]
 
     if args.smoke_test:
         print("\n" + "!"*50)
@@ -293,7 +347,7 @@ def train(infile, outfile, seed):
         smoke_n = min(2 * BATCH_SIZE, len(ds_train))
         smoke_test_n = min(2 * BATCH_SIZE, len(ds_test))
         ds_train = torch.utils.data.Subset(ds_train, range(smoke_n))
-        ds_test = torch.utils.data.Subset(ds_test, range(smoke_test_n))\
+        ds_test = torch.utils.data.Subset(ds_test, range(smoke_test_n))
                                                                
     print(_("Dataset size (>= {min_atoms} target {spect_set} nuclei): Train={n_train}, Test={n_test}",
             min_atoms=MIN_ATOMS, spect_set=SPECT_SET, n_train=len(ds_train), n_test=len(ds_test)))
@@ -305,27 +359,55 @@ def train(infile, outfile, seed):
     dl_train_eval = DataLoader(ds_train, batch_size=64, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
     dl_test_eval = DataLoader(ds_test, batch_size=64, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
 
-    net_params = net_params_base.copy()
-    net_params['g_feature_n'] = g_feature_n
-    net_params['OUT_DIM'] =  len(tgt_nucs)
+    min_std_ppm = float(STD_REGULARIZE)
+    init_std_ppm = float(args.init_std) if args.init_std is not None else (5.0 if SPECT_SET == '13C' else 1.0)
+    max_std_ppm = float(args.max_std) if args.max_std is not None else (100.0 if SPECT_SET == '13C' else 10.0)
 
-    if LOSS_TYPE == 'beta_nll':
-        min_std_ppm = float(STD_REGULARIZE)
-        init_std_ppm = float(args.init_std) if args.init_std is not None else (5.0 if SPECT_SET == '13C' else 1.0)
-        max_std_ppm = float(args.max_std) if args.max_std is not None else (100.0 if SPECT_SET == '13C' else 10.0)
-        net_params['var_mode'] = 'softplus_var'
-        net_params['min_var'] = min_std_ppm ** 2
-        net_params['init_var'] = init_std_ppm ** 2
-        net_params['max_var'] = max_std_ppm ** 2
+    if ARCH == 'v2':
+        net_name = 'NMRResPredictV2'
+        net_params = {
+            'g_feature_n': g_feature_n,
+            'int_d': args.int_d,
+            'layer_n': args.layer_n,
+            'GS': adj_channels,
+            'OUT_DIM': len(tgt_nucs),
+            'spatial_dim': spatial_dim,
+            'spatial_hidden': 64,
+            'dropout': 0.01,
+            'resnet_d': 128,
+            'resnet_depth': 3,
+            'mixture_n': args.mixture_n,
+            'mixture_num_obs_per': min(args.mixture_obs, args.mixture_n),
+            'min_var': min_std_ppm ** 2,
+            'init_var': init_std_ppm ** 2,
+            'max_var': max_std_ppm ** 2,
+        }
+    else:
+        net_name = 'GraphVertModel'
+        net_params = net_params_base.copy()
+        net_params['g_feature_n'] = g_feature_n
+        net_params['OUT_DIM'] = len(tgt_nucs)
+        if LOSS_TYPE == 'beta_nll':
+            net_params['var_mode'] = 'softplus_var'
+            net_params['min_var'] = min_std_ppm ** 2
+            net_params['init_var'] = init_std_ppm ** 2
+            net_params['max_var'] = max_std_ppm ** 2
 
     # === 2. MODEL INSTANTIATION & PRE-TRAINED WEIGHTS LOADING ===
     if LOAD_WEIGHTS:
         if not os.path.exists(LOAD_WEIGHTS):
             raise FileNotFoundError(_("ERROR: Specified checkpoint file not found: {path}", path=LOAD_WEIGHTS))
         print(_("Loading pre-trained weights from {path}...", path=LOAD_WEIGHTS))
-        net = load_pretrained_checkpoint(LOAD_WEIGHTS, net_params)
+        net = load_pretrained_checkpoint(LOAD_WEIGHTS, net_params, net_name=net_name)
     else:
-        net = nets.GraphVertModel(**net_params)
+        if net_name == 'NMRResPredictV2':
+            net = nets.NMRResPredictV2(**net_params)
+        else:
+            net = nets.GraphVertModel(**net_params)
+
+    n_params = sum(p.numel() for p in net.parameters())
+    print(f"Model: {net_name} | Atom features: {g_feature_n} | Adj channels: {adj_channels} | "
+          f"3D spatial channels: {spatial_dim} | Parameters: {n_params / 1e6:.2f}M")
 
     net = move(net, USE_CUDA)
 
@@ -369,10 +451,15 @@ def train(infile, outfile, seed):
                                                           cm_norm=CM_NORM)
 
         else: # warmup
-            opt_params['lr'] = args.lr if args.lr is not None else 1e-4
+            default_warmup_lr = 5e-4 if ARCH == 'v2' else 1e-4
+            opt_params['lr'] = args.lr if args.lr is not None else default_warmup_lr
             if LOSS_TYPE == 'beta_nll':
+                heads_info = (
+                    f", heads={net_params['mixture_n']} (obs={net_params['mixture_num_obs_per']})"
+                    if ARCH == 'v2' else ""
+                )
                 print(
-                    f"=== RUNNING STAGE: WARMUP (BETA-NLL, beta={BETA}, "
+                    f"=== RUNNING STAGE: WARMUP ({net_name}, BETA-NLL, beta={BETA}{heads_info}, "
                     f"min_std={np.sqrt(net_params['min_var']):.4g} ppm, "
                     f"init_std={np.sqrt(net_params['init_var']):.4g} ppm, "
                     f"max_std={np.sqrt(net_params['max_var']):.4g} ppm, "
@@ -405,7 +492,8 @@ def train(infile, outfile, seed):
 
         if LOSS_TYPE == 'beta_nll':
             beta_tag = f"b{str(BETA).replace('.', 'p')}"
-            STAGE_MODEL_NAME = "{}_{}_betanll_{}.{:08d}".format(EXP_NAME, stage_protocol, beta_tag, int(time.time() % 1e8))
+            arch_tag = "v2_" if ARCH == 'v2' else ""
+            STAGE_MODEL_NAME = "{}_{}_{}betanll_{}.{:08d}".format(EXP_NAME, stage_protocol, arch_tag, beta_tag, int(time.time() % 1e8))
         else:
             STAGE_MODEL_NAME = "{}_{}.{:08d}".format(EXP_NAME, stage_protocol, int(time.time() % 1e8))
         smoke_stage_names.append(STAGE_MODEL_NAME)
@@ -442,6 +530,7 @@ def train(infile, outfile, seed):
         writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
 
         metadata = {'dataset_hparams' : dataset_hparams, 
+                    'net_name' : net_name,
                     'net_params' : net_params, 
                     'opt_params' : opt_params, 
                     'infile' : infile, 

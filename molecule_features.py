@@ -9,10 +9,13 @@ from util import get_nos_coords
 
 
 def feat_tensor_mol(mol, feat_distances=True, feat_r_pow = None, 
-                    MAX_POW_M = 2.0, conf_idx = 0):
+                    MAX_POW_M = 2.0, conf_idx = 0,
+                    spatial_rbf_centers=None, spatial_rbf_sigma=0.5,
+                    spatial_inv_r3=False):
     """
-    Return matrix features for molecule
-    
+    Return matrix features for molecule (ATOM_N x ATOM_N x C).
+    Supports optional SE(3)-invariant 3D Gaussian RBF distance shells and
+    1/r^3 through-space kernels (with zero diagonal).
     """
     res_mats = []
     
@@ -41,8 +44,34 @@ def feat_tensor_mol(mol, feat_distances=True, feat_r_pow = None,
                 e_pow = np.minimum(e_pow, MAX_POW_M)
 
             res_mats.append(e_pow)
+
+    if spatial_rbf_centers is not None or spatial_inv_r3:
+        diff = coords[:, None, :] - coords[None, :, :]
+        dist = np.sqrt(np.sum(diff ** 2, axis=-1)).astype(np.float32)
+        valid_3d = (np.max(dist) > 1e-3)
+        off_diag = (~np.eye(ATOM_N, dtype=bool)) & (dist > 0.1)
+
+        if spatial_rbf_centers is not None:
+            sigma = float(spatial_rbf_sigma)
+            for mu_r in spatial_rbf_centers:
+                if valid_3d:
+                    rbf = np.exp(-0.5 * ((dist - float(mu_r)) / sigma) ** 2).astype(np.float32)
+                    rbf = rbf * off_diag
+                else:
+                    rbf = np.zeros((ATOM_N, ATOM_N), dtype=np.float32)
+                res_mats.append(rbf[:, :, np.newaxis])
+
+        if spatial_inv_r3:
+            if valid_3d:
+                safe_d = np.where(dist > 0.5, dist, 0.5)
+                inv_r3 = np.minimum(1.0 / (safe_d ** 3), 1.0).astype(np.float32)
+                inv_r3 = inv_r3 * off_diag
+            else:
+                inv_r3 = np.zeros((ATOM_N, ATOM_N), dtype=np.float32)
+            res_mats.append(inv_r3[:, :, np.newaxis])
+
     if len(res_mats) > 0:
-        M = np.concatenate(res_mats, 2)
+        M = np.concatenate(res_mats, 2).astype(np.float32)
     else: # Empty matrix
         M = np.zeros((ATOM_N, ATOM_N, 0), dtype=np.float32)
 
@@ -84,12 +113,13 @@ def mol_to_nums_adj(m, MAX_ATOM_N=None):# , kekulize=False):
 
 
 def feat_mol_adj(mol, edge_weighted=True, add_identity=False, 
-                 norm_adj=False, split_weights = None):
+                 norm_adj=False, split_weights = None, edge_bin=False):
     """
     Compute the adjacency matrix for this molecule
 
     If split-weights == [1, 2, 3] then we create separate adj matrices for those
-    edge weights
+    edge weights. If edge_bin=True, prepends a binary "any bond" adjacency channel
+    (matching Williams & Jonas 2023).
 
     NOTE: We do not kekulize the molecule, we assume that has already been done
 
@@ -109,9 +139,14 @@ def feat_mol_adj(mol, edge_weighted=True, add_identity=False,
         else:
             adj[adj > 0] = 1.0
     else:
-        split_adj = torch.zeros((len(split_weights), ADJ_N, ADJ_N ))
+        n_chan = len(split_weights) + (1 if edge_bin else 0)
+        split_adj = torch.zeros((n_chan, ADJ_N, ADJ_N))
+        offset = 0
+        if edge_bin:
+            split_adj[0] = (adj > 0).float()
+            offset = 1
         for i in range(len(split_weights)):
-            split_adj[i] = (adj == split_weights[i])
+            split_adj[i + offset] = (adj == split_weights[i]).float()
         adj = split_adj
         
     if norm_adj and not add_identity:

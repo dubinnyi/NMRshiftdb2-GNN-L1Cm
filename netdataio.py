@@ -107,7 +107,8 @@ class MoleculeDatasetMulti(torch.utils.data.Dataset):
                  PRED_N = 1, 
                  feat_vert_args = {}, 
                  feat_edge_args = {}, 
-                 adj_args = {}, combine_mat_vect = None, 
+                 adj_args = {}, combine_mat_vect = None,
+                 return_idx = False,
         ):
         self.mols = mols
         self.pred_vals = pred_vals
@@ -120,6 +121,7 @@ class MoleculeDatasetMulti(torch.utils.data.Dataset):
         self.combine_mat_vect = combine_mat_vect
         #self.mask_zeroout_prob = mask_zeroout_prob
         self.PRED_N = PRED_N
+        self.return_idx = return_idx
 
     def __len__(self):
         return len(self.mols)
@@ -135,7 +137,8 @@ class MoleculeDatasetMulti(torch.utils.data.Dataset):
         mol = self.mols[idx]
         pred_val = self.pred_vals[idx]
 
-        conf_idx = np.random.randint(mol.GetNumConformers())
+        n_confs = mol.GetNumConformers()
+        conf_idx = np.random.randint(n_confs) if n_confs > 0 else 0
 
         if self.cache_key(idx, conf_idx) in self.cache:
             return self.mask_sel(self.cache[self.cache_key(idx, conf_idx)])
@@ -186,9 +189,12 @@ class MoleculeDatasetMulti(torch.utils.data.Dataset):
                 mask[int(k), pn] = 1.0
                 vals[int(k), pn] = v
 
-        v = (adj, vect_feat, mat_feat, 
-            vals, 
-            mask,)
+        if self.return_idx:
+            v = (adj, vect_feat, mat_feat, vals, mask, idx)
+        else:
+            v = (adj, vect_feat, mat_feat, 
+                vals, 
+                mask,)
         
         
         self.cache[self.cache_key(idx, conf_idx)] = v

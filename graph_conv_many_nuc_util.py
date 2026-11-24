@@ -66,13 +66,66 @@ DEFAULT_DATA_HPARAMS = {'feat_vect_args' : default_feat_vect_args,
                        'feat_mat_args' : default_feat_mat_args, 
                        'adj_args' : default_adj_args}
 
+# Rich feature preset for NMRResPredictV2:
+# - Maximum chemical/topological/electronic atom features (MMFF94, Gasteiger, Pauling EN,
+#   radii, 3D chirality, conjugation, H-neighbor count, ring sizes 3-8)
+# - SE(3)-invariant 3D through-space 1/r^3 local environment descriptors
+# - Explicit CH2 proton differentiation features (first/second H order, ring/chiral/asym context)
+# - 5 topological adjacency channels (any bond + single/aromatic/double/triple, matching Williams 2023)
+# - 6 SE(3)-invariant pairwise 3D spatial kernels (5 Gaussian RBF distance shells + 1/r^3)
+full_feat_vect_args = dict(
+    feat_atomicno_onehot=default_atomicno,
+    feat_pos=False,
+    feat_atomicno=False,
+    feat_valence=True,
+    total_valence_onehot=True,
+    aromatic=True,
+    hybridization=True,
+    partial_charge=True,
+    formal_charge=True,
+    r_covalent=True,
+    r_vanderwals=True,
+    default_valence=True,
+    rings=True,
+    max_ring_size=9,
+    mmff_atom_types_onehot=True,
+    electronegativity=True,
+    chirality=True,
+    assign_stereo=True,
+    extra_topo=True,
+    geom_3d_atom=True,
+    ch2_order_feat=True,
+)
+
+full_feat_mat_args = dict(
+    feat_distances=False,
+    feat_r_pow=None,
+    spatial_rbf_centers=[1.5, 2.2, 3.0, 4.0, 5.5],
+    spatial_rbf_sigma=0.5,
+    spatial_inv_r3=True,
+)
+
+full_adj_args = dict(
+    edge_weighted=False,
+    norm_adj=False,
+    add_identity=False,
+    split_weights=default_split_weights,
+    edge_bin=True,
+)
+
+FULL_DATA_HPARAMS = {
+    'feat_vect_args': full_feat_vect_args,
+    'feat_mat_args': full_feat_mat_args,
+    'adj_args': full_adj_args,
+}
+
 def dict_combine(d1, d2):
     d1 = copy.deepcopy(d1)
     d1.update(d2)
     return d1
 
 
-def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
+def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0, return_idx=False):
     d = pickle.load(open(exp_config['filename'], 'rb'))
     train_df = d['train_df']
     test_df = d['test_df'] 
@@ -96,7 +149,8 @@ def make_datasets(exp_config, hparams, train_sample=0, min_atoms=0):
                                             MAX_N, len(tgt_nucs), 
                                             hparams['feat_vect_args'], 
                                             hparams['feat_mat_args'], 
-                                            hparams['adj_args'])        
+                                            hparams['adj_args'],
+                                            return_idx=return_idx)        
         datasets[phase] = ds
 
     return datasets['train'], datasets['test']
@@ -151,7 +205,16 @@ def run_epoch(net, optimizer, criterion, dl,
     else:
         iterator = enumerate(dl)
 
-    for i_batch, (adj, vect_feat, mat_feat, vals, mask) in iterator:
+    net_inner = net.module if isinstance(net, torch.nn.DataParallel) else net
+    accepts_spatial_and_idx = getattr(net_inner, 'accepts_spatial_and_idx', False)
+
+    for i_batch, batch in iterator:
+        if len(batch) == 6:
+            adj, vect_feat, mat_feat, vals, mask, mol_idx = batch
+        else:
+            adj, vect_feat, mat_feat, vals, mask = batch
+            mol_idx = None
+
         t1 = time.time()
         if print_shapes:
             print("adj.shape=", adj.shape, "vect_feat.shape=", vect_feat.shape, 
@@ -162,18 +225,22 @@ def run_epoch(net, optimizer, criterion, dl,
 
         adj_t = move(adj, USE_CUDA)
         vect_feat_t = move(vect_feat, USE_CUDA)
-        mat_feat_t = None
+        mat_feat_t = move(mat_feat, USE_CUDA) if accepts_spatial_and_idx else None
         mask_t = move(mask, USE_CUDA)
         vals_t = move(vals, USE_CUDA)
 
         with torch.amp.autocast('cuda', enabled=USE_CUDA, dtype=amp_dtype):
-            res = net((adj_t, vect_feat_t))
+            if accepts_spatial_and_idx:
+                res = net((adj_t, vect_feat_t, mat_feat_t, mol_idx))
+            else:
+                res = net((adj_t, vect_feat_t))
 
             if return_pred:
                 accum_pred_val = {}
                 if isinstance(res, dict):
                     for k, v in res.items():
-                        accum_pred_val[k] = res[k].float().cpu().detach().numpy()
+                        if k in ('mu', 'std', 'var', 'std_alea', 'std_epi', 'res') and torch.is_tensor(v):
+                            accum_pred_val[k] = v.float().cpu().detach().numpy()
                 else:
                     accum_pred_val['res'] = res.float().cpu().detach().numpy()
                 accum_pred_val['mask'] = mask.float().cpu().detach().numpy()
@@ -429,7 +496,9 @@ class PredModel(object):
         dataset_hparams = self.meta['dataset_hparams']
         MAX_N = self.meta.get('max_n', 32)
         USE_CUDA = self.USE_CUDA
-        COMBINE_MAT_VECT='row'
+        net_inner = self.net.module if isinstance(self.net, torch.nn.DataParallel) else self.net
+        is_v2 = getattr(net_inner, 'accepts_spatial_and_idx', False)
+        COMBINE_MAT_VECT = None if is_v2 else 'row'
 
         feat_vect_args = dataset_hparams['feat_vect_args']
         feat_mat_args = dataset_hparams['feat_mat_args']
@@ -438,7 +507,8 @@ class PredModel(object):
         ds = netdataio.MoleculeDatasetMulti(rdmols, values, 
                                             MAX_N, len(self.meta['tgt_nucs']), feat_vect_args, 
                                             feat_mat_args, adj_args,  
-                                            combine_mat_vect=COMBINE_MAT_VECT)   
+                                            combine_mat_vect=COMBINE_MAT_VECT,
+                                            return_idx=is_v2)   
         dl = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False)
 
         results_df = []
@@ -448,12 +518,13 @@ class PredModel(object):
                         return_pred = True, print_shapes=debug, desc='predict',
                         progress_bar=prog_bar)
         
+        extra_pred_keys = [k for k in ('pred_std_alea', 'pred_std_epi') if k in res]
         for rd_mol_i, (rdmol, true_val) in enumerate(zip(rdmols, values)):
             for nuc_i, nuc in enumerate(self.meta['tgt_nucs']):
                 true_nuc_spect = true_val[nuc_i]
                 for atom_idx, true_shift in true_nuc_spect.items():
                     atom_res = {}
-                    for pred_key in ['pred_mu', 'pred_std']:
+                    for pred_key in ['pred_mu', 'pred_std'] + extra_pred_keys:
                         atom_res[pred_key] = res[pred_key][rd_mol_i, atom_idx, nuc_i]
                     atom_res['nuc_i'] = nuc_i
                     atom_res['nuc'] = nuc

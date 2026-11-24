@@ -25,6 +25,8 @@ RU_MESSAGES = {
     # === respredict_pipeline.py: CLI arguments & validation ===
     "NMR GNN Training Pipeline":
         "Пайплайн обучения GNN для предсказания химических сдвигов ЯМР",
+    "Model architecture: v2 (lightweight Williams-2023 polynomial GNN + 3D RBF + CH2 features + multi-head beta-NLL) or legacy (original GraphVertModel). Default: v2":
+        "Архитектура модели: v2 (легкая полиномиальная GNN Williams-2023 + 3D RBF + признаки CH2 + многоголовый beta-NLL) или legacy (оригинальная GraphVertModel). По умолчанию: v2",
     "Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib)":
         "Режим: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib)",
     "Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib). Default: warmup for beta_nll, auto for nolog":
@@ -33,10 +35,24 @@ RU_MESSAGES = {
         "Функция потерь неопределенности: beta_nll (Seitzer et al., ICLR 2022) или nolog (оригинальная Jonas & Kuhn). По умолчанию: beta_nll",
     "Beta exponent in [0, 1] for beta-NLL loss (0=standard NLL, 0.5=default, 1=MSE mean gradient)":
         "Показатель beta в [0, 1] для beta-NLL (0=обычный NLL, 0.5=по умолчанию, 1=градиент MSE по среднему)",
+    "Number of probabilistic bootstrap readout heads in v2 architecture (default: 5)":
+        "Число вероятностных bootstrap-голов в архитектуре v2 (по умолчанию: 5)",
+    "Number of heads trained per molecule in v2 bootstrap subsampling (default: 4)":
+        "Число голов, обучаемых на каждую молекулу в bootstrap-подвыборке v2 (по умолчанию: 4)",
+    "Hidden GNN width for v2 architecture (default: 256, lightweight as in Williams & Jonas 2023)":
+        "Ширина скрытого слоя GNN в архитектуре v2 (по умолчанию: 256, легкая модель как в Williams & Jonas 2023)",
+    "Number of GNN message-passing layers for v2 architecture (default: 8)":
+        "Число слоев передачи сообщений GNN в архитектуре v2 (по умолчанию: 8)",
+    "Training batch size (default: 32 for v2, 16 for legacy)":
+        "Размер батча обучения (по умолчанию: 32 для v2, 16 для legacy)",
+    "Disable 3D spatial features in v2 (ablation: pure 2D + rich chemical + CH2 features)":
+        "Отключить 3D-пространственные признаки в v2 (абляция: чистый 2D + расширенные химические + CH2 признаки)",
     "Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: 13C=5.0, 1H=1.0":
         "Начальная предсказываемая std (в ppm) для softplus-головы дисперсии beta-NLL. По умолчанию: 13C=5.0, 1H=1.0",
     "Maximum predicted std clamp (in ppm) for beta-NLL variance head. Default: 13C=100.0, 1H=10.0":
         "Максимальное ограничение std (в ppm) для головы дисперсии beta-NLL. По умолчанию: 13C=100.0, 1H=10.0",
+    "ERROR: --arch v2 (NMRResPredictV2) requires --loss beta_nll. Use --arch legacy --loss nolog for the original Jonas & Kuhn model.":
+        "ОШИБКА: --arch v2 (NMRResPredictV2) требует --loss beta_nll. Используйте --arch legacy --loss nolog для оригинальной модели Jonas & Kuhn.",
     "ERROR: --beta must be in [0.0, 1.0], got {beta}":
         "ОШИБКА: параметр --beta должен быть в [0.0, 1.0], получено {beta}",
     "ERROR: --loss beta_nll is currently implemented for stage 'warmup' only. Pass --protocol warmup (or omit --protocol), or use --loss nolog for legacy molcalib/auto.":
@@ -61,6 +77,8 @@ RU_MESSAGES = {
         "Явный вес штрафа LAMBDA_PENALTY (если не указан, выбирается автоматически под норму и ядро)",
     "Explicit learning rate. Default: warmup=1e-4, molcalib=3e-5":
         "Явный шаг обучения (learning rate). По умолчанию: warmup=1e-4, molcalib=3e-5",
+    "Explicit learning rate. Default: v2=5e-4, legacy warmup=1e-4, molcalib=3e-5":
+        "Явный шаг обучения (learning rate). По умолчанию: v2=5e-4, legacy warmup=1e-4, molcalib=3e-5",
     "Allowed per-stage increase in Student-t df divergence (df_train - df_test). Default: 0.42 (two-stage cap <= 0.84)":
         "Допустимый прирост разницы степеней свободы Стьюдента (df_train - df_test) на один этап (по умолчанию: 0.42, суммарно за два этапа <= 0.84)",
     "Minimum number of base training epochs before early stopping is armed (default: warmup=50, molcalib=20)":

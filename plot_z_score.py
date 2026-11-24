@@ -28,11 +28,13 @@ def epoch_res_to_df(res, tgt_nucs):
     pred_std = res['pred_std']
     pred_mask = res['pred_mask']
     pred_truth = res['pred_truth']
+    pred_std_alea = res.get('pred_std_alea', None)
+    pred_std_epi = res.get('pred_std_epi', None)
 
     dfs = []
     for nuc_i, nuc in enumerate(tgt_nucs):
         m_pos_idx, atom_idx = np.where(pred_mask[:, :, nuc_i] > 0)
-        df_nuc = pd.DataFrame({
+        cols = {
             'pred_mu': pred_mu[m_pos_idx, atom_idx, nuc_i].astype(np.float64),
             'pred_std': pred_std[m_pos_idx, atom_idx, nuc_i].astype(np.float64),
             'nuc_i': nuc_i,
@@ -40,8 +42,12 @@ def epoch_res_to_df(res, tgt_nucs):
             'atom_idx': atom_idx,
             'm_pos': m_pos_idx,
             'value': pred_truth[m_pos_idx, atom_idx, nuc_i].astype(np.float64),
-        })
-        dfs.append(df_nuc)
+        }
+        if pred_std_alea is not None:
+            cols['pred_std_alea'] = pred_std_alea[m_pos_idx, atom_idx, nuc_i].astype(np.float64)
+        if pred_std_epi is not None:
+            cols['pred_std_epi'] = pred_std_epi[m_pos_idx, atom_idx, nuc_i].astype(np.float64)
+        dfs.append(pd.DataFrame(cols))
 
     if len(dfs) == 0:
         return pd.DataFrame(columns=['pred_mu', 'pred_std', 'nuc_i', 'nuc', 'atom_idx', 'm_pos', 'value'])
@@ -298,6 +304,10 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
         row[f'{tag}_pen'] = pen_weighted
         row[f'{tag}_tot_loss'] = tot_loss
         row[f'{tag}_std_mean'] = float(np.mean(std_real))
+        if 'pred_std_alea' in df.columns:
+            row[f'{tag}_std_alea_mean'] = float(np.mean(df['pred_std_alea'].astype(np.float64)))
+        if 'pred_std_epi' in df.columns:
+            row[f'{tag}_std_epi_mean'] = float(np.mean(df['pred_std_epi'].astype(np.float64)))
         row[f'{tag}_cov68'] = float(np.mean(np.abs(z_raw) <= 1.0)) if len(z_raw) > 0 else np.nan
         row[f'{tag}_cov95'] = float(np.mean(np.abs(z_raw) <= 1.96)) if len(z_raw) > 0 else np.nan
         row[f'{tag}_cm_mean'] = float(np.mean(cm_vals)) if len(cm_vals) > 0 else np.nan
@@ -516,7 +526,10 @@ def load_model_for_eval(state_path, meta):
             cleaned_state_dict[clean_k] = v
 
         net_params = meta['net_params'].copy()
-        net = nets.GraphVertModel(**net_params)
+        if meta.get('net_name') == 'NMRResPredictV2':
+            net = nets.NMRResPredictV2(**net_params)
+        else:
+            net = nets.GraphVertModel(**net_params)
         net.load_state_dict(cleaned_state_dict, strict=True)
     else:
         raise ValueError(_("Unknown object type in {path}: {obj_type}", path=state_path, obj_type=type(obj)))
@@ -609,8 +622,9 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
 
         print(_("Reading source dataset: {path}", path=infile))
         dataset_hparams = meta['dataset_hparams']
+        is_v2 = (meta.get('net_name') == 'NMRResPredictV2')
         ds_train, ds_test = graph_conv_many_nuc_util.make_datasets(
-            {'filename': infile}, dataset_hparams, min_atoms=5
+            {'filename': infile}, dataset_hparams, min_atoms=5, return_idx=is_v2
         )
         dl_train_eval = torch.utils.data.DataLoader(ds_train, batch_size=64, shuffle=False, num_workers=4)
         dl_test_eval = torch.utils.data.DataLoader(ds_test, batch_size=64, shuffle=False, num_workers=4)
