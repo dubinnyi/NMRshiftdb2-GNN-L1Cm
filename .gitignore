@@ -1,6 +1,7 @@
 -e __pycache__/
 *.pyc
 *~
+*.swp
 original_*
 .ruffus_history.sqlite
 checkpoints_13C/
