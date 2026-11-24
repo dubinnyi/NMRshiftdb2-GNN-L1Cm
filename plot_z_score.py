@@ -153,21 +153,27 @@ def plot_stats(sigma_vals, cm_vals, title_prefix, axes, std_reg, filename=""):
     ax_cm.legend(loc='upper right')
 
 
-def process_predictions(res_df, std_reg, apply_cm, spect_set='13C'):
+def process_predictions(res_df, std_reg, apply_cm, spect_set='13C', loss_type='nolog'):
     """
-    Convert predicted uncertainty values into physical ppm units (accounting for
-    mu_scale / std_scale for 1H) and compute per-molecule calibration shifts C_m and Z-scores.
+    Convert predicted uncertainty values into physical ppm units and compute
+    per-molecule calibration shifts C_m and Z-scores.
+    - For legacy 'nolog': pred_std is raw ReLU output -> (pred_std + std_reg) * (mu_scale / std_scale).
+    - For 'beta_nll': pred_std is already physical sqrt(var) in ppm (with min_var = min_error^2 built in).
     """
-    if spect_set == '1H':
-        mu_scale = 0.05
-        std_scale = 10.0
-    else:
-        mu_scale = 1.0
-        std_scale = 1.0
-
     pred_mu_real = res_df['pred_mu'].astype(np.float64)
-    pred_std_real = (res_df['pred_std'].astype(np.float64) + std_reg) * (mu_scale / std_scale)
-    std_reg_real = std_reg * (mu_scale / std_scale)
+    if loss_type == 'beta_nll':
+        pred_std_real = res_df['pred_std'].astype(np.float64)
+        std_reg_real = float(std_reg)
+    else:
+        if spect_set == '1H':
+            mu_scale = 0.05
+            std_scale = 10.0
+        else:
+            mu_scale = 1.0
+            std_scale = 1.0
+
+        pred_std_real = (res_df['pred_std'].astype(np.float64) + std_reg) * (mu_scale / std_scale)
+        std_reg_real = std_reg * (mu_scale / std_scale)
 
     res_df = res_df.copy()
     res_df['w'] = 1.0 / (pred_std_real ** 2)
@@ -194,11 +200,13 @@ def process_predictions(res_df, std_reg, apply_cm, spect_set='13C'):
 def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
                                      std_reg, protocol, spect_set,
                                      cm_norm="L2", lambda_penalty=0.0,
-                                     metrics_csv_path=None):
+                                     metrics_csv_path=None,
+                                     loss_type="nolog", beta=0.0):
     """
-    Compute comprehensive training monitoring metrics (MAE before and after C_m calibration,
-    pseudo-NLL log_normal_nolog, C_m penalty, Sigma and C_m statistics, Student-t parameters
-    nu, loc, scale for raw and calibrated Z-scores, df divergence d_nu, and scale ratio ratio_sc)
+    Compute comprehensive training monitoring metrics (MAE/RMSE before and after C_m calibration,
+    exact Gaussian NLL for beta_nll or pseudo-NLL log_normal_nolog for nolog, C_m penalty,
+    Sigma and C_m statistics, empirical 68%/95% coverage, Student-t parameters nu, loc, scale
+    for raw and calibrated Z-scores, df divergence d_nu, and scale ratio ratio_sc)
     and append a summary row to the cumulative CSV file every 10 epochs.
     """
     if spect_set == '1H':
@@ -211,6 +219,8 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
     row = {
         'epoch': int(epoch_i),
         'protocol': protocol,
+        'loss_type': loss_type,
+        'beta': float(beta),
         'cm_norm': cm_norm,
         'lambda_penalty': float(lambda_penalty),
     }
@@ -218,7 +228,10 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
     for tag, df in [('tr', res_train_df), ('te', res_test_df)]:
         if len(df) == 0:
             continue
-        std_real = (df['pred_std'].astype(np.float64) + std_reg) * (mu_scale / std_scale)
+        if loss_type == 'beta_nll':
+            std_real = df['pred_std'].astype(np.float64)
+        else:
+            std_real = (df['pred_std'].astype(np.float64) + std_reg) * (mu_scale / std_scale)
         delta_raw = df['value'].astype(np.float64) - df['pred_mu'].astype(np.float64)
         w = 1.0 / (std_real ** 2)
 
@@ -244,15 +257,22 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
         else:
             nu_cal, loc_cal, sc_cal = np.nan, np.nan, np.nan
 
-        # Evaluate pseudo-NLL matching the original log_normal_nolog formulation:
-        # element_wise = (y_sc - mu_sc)^2 / (2 * std_sc^2) + std_sc
-        y_sc = df['value'].astype(np.float64) / mu_scale
-        mu_raw_sc = df['pred_mu'].astype(np.float64) / mu_scale
-        mu_cal_sc = (df['pred_mu'].astype(np.float64) + atom_cm) / mu_scale
-        std_sc = (df['pred_std'].astype(np.float64) + std_reg) / std_scale
+        if loss_type == 'beta_nll':
+            # Exact unweighted Gaussian NLL in nats (Seitzer et al., Sec. 4.1)
+            var_real = np.maximum(std_real ** 2, float(std_reg) ** 2)
+            log_2pi = np.log(2.0 * np.pi)
+            nll_raw = float((0.5 * (delta_raw ** 2 / var_real + np.log(var_real) + log_2pi)).mean())
+            nll_cal = float((0.5 * (delta_cal ** 2 / var_real + np.log(var_real) + log_2pi)).mean())
+        else:
+            # Evaluate pseudo-NLL matching the original log_normal_nolog formulation:
+            # element_wise = (y_sc - mu_sc)^2 / (2 * std_sc^2) + std_sc
+            y_sc = df['value'].astype(np.float64) / mu_scale
+            mu_raw_sc = df['pred_mu'].astype(np.float64) / mu_scale
+            mu_cal_sc = (df['pred_mu'].astype(np.float64) + atom_cm) / mu_scale
+            std_sc = (df['pred_std'].astype(np.float64) + std_reg) / std_scale
 
-        nll_raw = float(((y_sc - mu_raw_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
-        nll_cal = float(((y_sc - mu_cal_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
+            nll_raw = float(((y_sc - mu_raw_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
+            nll_cal = float(((y_sc - mu_cal_sc) ** 2 / (2.0 * (std_sc ** 2)) + std_sc).mean())
 
         cm_vals = cm_per_mol.dropna().values
         if str(cm_norm).upper() == 'L1':
@@ -271,12 +291,15 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
             cm_std_99 = float(np.std(cm_vals)) if len(cm_vals) > 0 else np.nan
 
         row[f'{tag}_mae'] = float(np.mean(np.abs(delta_raw)))
+        row[f'{tag}_rmse'] = float(np.sqrt(np.mean(delta_raw ** 2)))
         row[f'{tag}_mae_cal'] = float(np.mean(np.abs(delta_cal)))
         row[f'{tag}_nll_raw'] = nll_raw
         row[f'{tag}_nll_cal'] = nll_cal
         row[f'{tag}_pen'] = pen_weighted
         row[f'{tag}_tot_loss'] = tot_loss
         row[f'{tag}_std_mean'] = float(np.mean(std_real))
+        row[f'{tag}_cov68'] = float(np.mean(np.abs(z_raw) <= 1.0)) if len(z_raw) > 0 else np.nan
+        row[f'{tag}_cov95'] = float(np.mean(np.abs(z_raw) <= 1.96)) if len(z_raw) > 0 else np.nan
         row[f'{tag}_cm_mean'] = float(np.mean(cm_vals)) if len(cm_vals) > 0 else np.nan
         row[f'{tag}_cm_std'] = float(np.std(cm_vals)) if len(cm_vals) > 0 else np.nan
         row[f'{tag}_cm_std_99'] = cm_std_99
@@ -298,26 +321,36 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
         row_df = pd.DataFrame([row])
         write_header = not os.path.exists(metrics_csv_path)
         row_df.to_csv(metrics_csv_path, mode='a', header=write_header, index=False, float_format='%.6f')
-        print(_("  [Metrics Ep {epoch_i:04d}] Appended metrics row to: {path} (te_mae_cal={te_mae_cal:.4f}, d_nu_cal={d_nu_cal:.2f}, ratio_sc_cal={ratio_sc_cal:.2f})",
-                epoch_i=epoch_i, path=metrics_csv_path,
-                te_mae_cal=row.get('te_mae_cal', float('nan')),
-                d_nu_cal=row.get('d_nu_cal', float('nan')),
-                ratio_sc_cal=row.get('ratio_sc_cal', float('nan'))))
+        if loss_type == 'beta_nll':
+            print(_("  [Metrics Ep {epoch_i:04d}] Appended metrics row to: {path} (te_mae={te_mae:.4f}, te_rmse={te_rmse:.4f}, te_nll={te_nll:.4f}, cov68={cov68:.3f}, cov95={cov95:.3f}, d_nu_raw={d_nu_raw:.2f})",
+                    epoch_i=epoch_i, path=metrics_csv_path,
+                    te_mae=row.get('te_mae', float('nan')),
+                    te_rmse=row.get('te_rmse', float('nan')),
+                    te_nll=row.get('te_nll_raw', float('nan')),
+                    cov68=row.get('te_cov68', float('nan')),
+                    cov95=row.get('te_cov95', float('nan')),
+                    d_nu_raw=row.get('d_nu_raw', float('nan'))))
+        else:
+            print(_("  [Metrics Ep {epoch_i:04d}] Appended metrics row to: {path} (te_mae_cal={te_mae_cal:.4f}, d_nu_cal={d_nu_cal:.2f}, ratio_sc_cal={ratio_sc_cal:.2f})",
+                    epoch_i=epoch_i, path=metrics_csv_path,
+                    te_mae_cal=row.get('te_mae_cal', float('nan')),
+                    d_nu_cal=row.get('d_nu_cal', float('nan')),
+                    ratio_sc_cal=row.get('ratio_sc_cal', float('nan'))))
 
     return row
 
 
 def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
-                         out_file_z, out_file_stats, title_label=""):
+                         out_file_z, out_file_stats, title_label="", loss_type="nolog"):
     """
     Build and save Z-score and statistics (Sigma, C_m) figures directly from DataFrames
     without requiring model checkpoint files (.state / .model).
     """
     z_train, sig_train, cm_train, n_atoms_tr, n_mols_tr, std_reg_real = process_predictions(
-        res_train, std_reg, apply_cm, spect_set
+        res_train, std_reg, apply_cm, spect_set, loss_type=loss_type
     )
     z_test, sig_test, cm_test, n_atoms_te, n_mols_te, _unused_std_reg = process_predictions(
-        res_test, std_reg, apply_cm, spect_set
+        res_test, std_reg, apply_cm, spect_set, loss_type=loss_type
     )
 
     if len(z_train) < 2 or len(z_test) < 2:
@@ -347,7 +380,8 @@ def plot_from_dataframes(res_train, res_test, std_reg, apply_cm, spect_set,
 def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
                             checkpoint_prefix, epoch_i, std_reg, protocol,
                             spect_set, plots_dir=None, use_cuda=True,
-                            test_res=None, cm_norm="L2", lambda_penalty=0.0):
+                            test_res=None, cm_norm="L2", lambda_penalty=0.0,
+                            loss_type="nolog", beta=0.0):
     """
     Called at the end of every N-th training epoch (e.g. every 10 epochs):
     1) Evaluates train and test predictions in memory (without saving heavy .state/.model files);
@@ -397,7 +431,9 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
         spect_set=spect_set,
         cm_norm=cm_norm,
         lambda_penalty=lambda_penalty,
-        metrics_csv_path=metrics_csv_path
+        metrics_csv_path=metrics_csv_path,
+        loss_type=loss_type,
+        beta=beta
     )
 
     if plots_dir is None:
@@ -415,7 +451,8 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
         res_train_df, res_test_df,
         std_reg=std_reg, apply_cm=apply_cm, spect_set=spect_set,
         out_file_z=out_file_z, out_file_stats=out_file_stats,
-        title_label=f"{stage_model_name}.{epoch_str}"
+        title_label=f"{stage_model_name}.{epoch_str}",
+        loss_type=loss_type
     )
 
     return metrics_row
@@ -492,7 +529,8 @@ def load_model_for_eval(state_path, meta):
 
 def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
                         protocol_override="", std_reg_override=None,
-                        out_dir_template="plots_{NUC}", force_recalc=False):
+                        out_dir_template="plots_{NUC}", force_recalc=False,
+                        loss_type_override=""):
     meta_file = find_meta_file(state_or_csv_path, meta_path)
     meta = None
     if meta_file is not None:
@@ -507,11 +545,22 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
         spect_set = tgt_nucs[0]
         std_reg = meta.get('loss_params', {}).get('std_regularize', 0.01 if spect_set == '1H' else 0.1)
         stage = meta.get('stage', '')
+        meta_loss_type = meta.get('loss_params', {}).get('loss_type', '')
     else:
         spect_set = '1H' if '1H' in state_or_csv_path else '13C'
         tgt_nucs = [spect_set]
         std_reg = 0.01 if spect_set == '1H' else 0.1
         stage = ''
+        meta_loss_type = ''
+
+    if loss_type_override:
+        loss_type = loss_type_override
+    elif meta_loss_type in ['beta_nll', 'nolog']:
+        loss_type = meta_loss_type
+    elif 'betanll' in state_or_csv_path:
+        loss_type = 'beta_nll'
+    else:
+        loss_type = 'nolog'
 
     if std_reg_override is not None:
         std_reg = std_reg_override
@@ -527,8 +576,8 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
 
     apply_cm = (protocol == 'molcalib')
     apply_str = _("YES") if apply_cm else _("NO")
-    print(_("Nucleus: {spect_set} | Protocol: {protocol} (subtract C_m={apply_str}) | std_reg={std_reg}",
-            spect_set=spect_set, protocol=protocol, apply_str=apply_str, std_reg=std_reg))
+    print(_("Nucleus: {spect_set} | Loss: {loss_type} | Protocol: {protocol} (subtract C_m={apply_str}) | std_reg={std_reg}",
+            spect_set=spect_set, loss_type=loss_type, protocol=protocol, apply_str=apply_str, std_reg=std_reg))
 
     csv_train_path, csv_test_path = resolve_csv_pair(state_or_csv_path)
 
@@ -618,7 +667,8 @@ def run_standalone_plot(state_or_csv_path, meta_path="", infile_override="",
         res_train, res_test,
         std_reg=std_reg, apply_cm=apply_cm, spect_set=spect_set,
         out_file_z=out_file_z, out_file_stats=out_file_stats,
-        title_label=state_basename
+        title_label=state_basename,
+        loss_type=loss_type
     )
 
 
@@ -634,6 +684,8 @@ if __name__ == "__main__":
                         help=_("Path to .pickle dataset file (required only when prediction CSVs are absent)"))
     parser.add_argument("--protocol", type=str, choices=["warmup", "molcalib"], default="",
                         help=_("Explicit protocol override (if omitted, inferred from metadata or filename)"))
+    parser.add_argument("--loss_type", type=str, choices=["beta_nll", "nolog"], default="",
+                        help=_("Explicit loss type override (if omitted, inferred from metadata or filename)"))
     parser.add_argument("--min_error", type=float, default=None,
                         help=_("Explicit std_regularize override (defaults to value in metadata)"))
     parser.add_argument("--out_dir", type=str, default="plots_{NUC}",
@@ -649,5 +701,6 @@ if __name__ == "__main__":
         protocol_override=args.protocol,
         std_reg_override=args.min_error,
         out_dir_template=args.out_dir,
-        force_recalc=args.force_recalc
+        force_recalc=args.force_recalc,
+        loss_type_override=args.loss_type
     )

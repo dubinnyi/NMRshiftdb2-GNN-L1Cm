@@ -415,7 +415,11 @@ class GraphVertModel(nn.Module):
                  resnet_out = False, resnet_blocks = (3, ), 
                  resnet_d = 128, 
                  graph_dropout=0.0, 
-                 force_lin_init=False):
+                 force_lin_init=False,
+                 var_mode='relu_std',
+                 init_var=1.0,
+                 min_var=1e-4,
+                 max_var=1000.0):
         
         if layer_n is not None:
             g_feature_out_n = [int_d] * layer_n
@@ -441,6 +445,25 @@ class GraphVertModel(nn.Module):
                                                 OUT_DIM=OUT_DIM)
 
         self.out_std = out_std
+        self.var_mode = var_mode
+        self.min_var = float(min_var)
+        self.max_var = float(max_var)
+        self.init_var = float(init_var)
+
+        if self.var_mode == 'softplus_var':
+            if not (self.min_var < self.init_var <= self.max_var):
+                raise ValueError(
+                    f"Expected min_var < init_var <= max_var, got "
+                    f"min_var={self.min_var}, init_var={self.init_var}, max_var={self.max_var}"
+                )
+            # Exact inverse of softplus(x) = init_var - min_var (following martius-lab/beta-nll),
+            # using expm1 and an asymptotic linear branch to avoid float overflow for large delta.
+            delta_var = self.init_var - self.min_var
+            self.init_var_offset = (
+                float(delta_var) if delta_var > 20.0 else float(np.log(np.expm1(delta_var)))
+            )
+        elif self.var_mode != 'relu_std':
+            raise ValueError(f"Unknown var_mode: {self.var_mode}")
 
         if out_std:
             self.lin_out_std1 = nn.Linear(g_feature_out_n[-1], 128)
@@ -476,8 +499,15 @@ class GraphVertModel(nn.Module):
             x_1 = self.lin_out(g_squeeze)
         if self.out_std:
             x_std = F.relu(self.lin_out_std1(g_squeeze))
-            x_1_std = F.relu(self.lin_out_std2(x_std))
-            return {'mu' : x_1, 'std' : x_1_std}
+            if getattr(self, 'var_mode', 'relu_std') == 'softplus_var':
+                # Compute variance in FP32 for numerical stability under AMP autocast
+                raw_var = self.lin_out_std2(x_std).float()
+                var = F.softplus(raw_var + self.init_var_offset) + self.min_var
+                var = torch.clamp(var, min=self.min_var, max=self.max_var)
+                return {'mu': x_1, 'var': var, 'std': torch.sqrt(var)}
+            else:
+                x_1_std = F.relu(self.lin_out_std2(x_std))
+                return {'mu' : x_1, 'std' : x_1_std}
         else:
             return x_1
 
@@ -806,3 +836,51 @@ class NormUncertainCalibrationLoss(nn.Module):
         total_loss = nll_loss + self.lambda_penalty * c_m_penalty
         
         return total_loss, nll_loss, c_m_penalty
+
+
+_LOG_2PI = float(np.log(2.0 * np.pi))
+
+
+class BetaNLLLoss(nn.Module):
+    """
+    Masked heteroscedastic Gaussian beta-NLL loss (Seitzer et al., ICLR 2022):
+        L_{beta-NLL} = sg[var^beta] * 0.5 * ((y - mu)^2 / var + log(var) + log(2*pi))
+
+    For beta == 0.0, reduces to the exact unweighted Gaussian NLL, which must be used
+    for validation and early stopping (Seitzer et al., Sec. 4.1).
+    Returns a 3-tuple (train_loss, true_unweighted_nll, zero_penalty) compatible with run_epoch.
+    """
+    def __init__(self, beta=0.5, min_var=1e-4, include_const=True):
+        super(BetaNLLLoss, self).__init__()
+        if not (0.0 <= float(beta) <= 1.0):
+            raise ValueError(f"beta must be in [0.0, 1.0], got {beta}")
+        self.beta = float(beta)
+        self.min_var = float(min_var)
+        self.include_const = bool(include_const)
+
+    def forward(self, pred, y, mask):
+        # Force FP32 precision for numerical stability under AMP autocast
+        mu = pred['mu'].float()
+        if 'var' in pred:
+            var = pred['var'].float()
+        else:
+            var = pred['std'].float() ** 2
+        var = torch.clamp(var, min=self.min_var)
+        y = y.float()
+        mask = mask.float()
+
+        nll_elem = 0.5 * ((y - mu) ** 2 / var + torch.log(var))
+        if self.include_const:
+            nll_elem = nll_elem + 0.5 * _LOG_2PI
+
+        denom = torch.clamp(mask.sum(), min=1.0)
+        true_nll = (nll_elem * mask).sum() / denom
+
+        if self.beta > 0.0:
+            weighted_elem = nll_elem * (var.detach() ** self.beta)
+            train_loss = (weighted_elem * mask).sum() / denom
+        else:
+            train_loss = true_nll
+
+        zero_pen = torch.zeros((), device=mu.device, dtype=mu.dtype)
+        return train_loss, true_nll, zero_pen

@@ -267,7 +267,10 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    max_d_nu=0.42,
                    df_patience=2,
                    min_te_nu=2.0,
-                   min_epochs=None):
+                   min_epochs=None,
+                   val_criterion=None):
+
+    eval_criterion = val_criterion if val_criterion is not None else criterion
 
     # GradScaler is only needed for float16 (bfloat16 has full float32 exponent range)
     use_bf16 = (USE_CUDA and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
@@ -306,7 +309,11 @@ def generic_runner(net, optimizer, scheduler, criterion,
 
         pts = train_res['total_points']
         train_loss = float(train_res['running_loss'] / pts) if pts > 0 else float('nan')
-        print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")
+        train_nll = float(train_res['running_nll'] / pts) if pts > 0 else float('nan')
+        if val_criterion is not None:
+            print(f"Epoch {epoch_i:04d} | Train beta-NLL: {train_loss:.4f} | Train NLL: {train_nll:.4f} | Time: {train_res['time']:.1f}s")
+        else:
+            print(f"Epoch {epoch_i:04d} | Train Loss: {train_loss:.4f} | Time: {train_res['time']:.1f}s")
 
         if not np.isfinite(train_loss) or has_nonfinite_parameters(net):
             # Recover from last known finite weights and reduce learning rate instead of crashing out on early epochs
@@ -331,9 +338,14 @@ def generic_runner(net, optimizer, scheduler, criterion,
         if epoch_i % 5 == 0:
             net.eval()
             with torch.no_grad():
-                test_res = run_epoch(net, optimizer, criterion, dl_test, 
+                test_res = run_epoch(net, optimizer, eval_criterion, dl_test, 
                                  pred_only = True, USE_CUDA=USE_CUDA, 
                                  return_pred=True, desc='validate')
+
+            test_pts_log = test_res['total_points']
+            if writer is not None and test_pts_log > 0:
+                writer.add_scalar("val_loss_total", test_res['running_loss']/test_pts_log, epoch_i)
+                writer.add_scalar("val_loss_nll", test_res['running_nll']/test_pts_log, epoch_i)
 
             if validate_func is not None:
                 val_metrics = validate_func(test_res)

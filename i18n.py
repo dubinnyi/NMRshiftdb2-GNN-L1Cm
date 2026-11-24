@@ -27,6 +27,20 @@ RU_MESSAGES = {
         "Пайплайн обучения GNN для предсказания химических сдвигов ЯМР",
     "Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib)":
         "Режим: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib)",
+    "Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib). Default: warmup for beta_nll, auto for nolog":
+        "Режим: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib). По умолчанию: warmup для beta_nll, auto для nolog",
+    "Uncertainty loss function: beta_nll (Seitzer et al., ICLR 2022) or nolog (legacy Jonas & Kuhn). Default: beta_nll":
+        "Функция потерь неопределенности: beta_nll (Seitzer et al., ICLR 2022) или nolog (оригинальная Jonas & Kuhn). По умолчанию: beta_nll",
+    "Beta exponent in [0, 1] for beta-NLL loss (0=standard NLL, 0.5=default, 1=MSE mean gradient)":
+        "Показатель beta в [0, 1] для beta-NLL (0=обычный NLL, 0.5=по умолчанию, 1=градиент MSE по среднему)",
+    "Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: 13C=5.0, 1H=1.0":
+        "Начальная предсказываемая std (в ppm) для softplus-головы дисперсии beta-NLL. По умолчанию: 13C=5.0, 1H=1.0",
+    "Maximum predicted std clamp (in ppm) for beta-NLL variance head. Default: 13C=100.0, 1H=10.0":
+        "Максимальное ограничение std (в ppm) для головы дисперсии beta-NLL. По умолчанию: 13C=100.0, 1H=10.0",
+    "ERROR: --beta must be in [0.0, 1.0], got {beta}":
+        "ОШИБКА: параметр --beta должен быть в [0.0, 1.0], получено {beta}",
+    "ERROR: --loss beta_nll is currently implemented for stage 'warmup' only. Pass --protocol warmup (or omit --protocol), or use --loss nolog for legacy molcalib/auto.":
+        "ОШИБКА: --loss beta_nll сейчас реализован только для этапа 'warmup'. Укажите --protocol warmup (или опустите --protocol), либо используйте --loss nolog для старого режима molcalib/auto.",
     "Path to pre-trained weights file (.state or .model)":
         "Путь к файлу предобученных весов (.state или .model)",
     "Target nucleus for chemical shift prediction":
@@ -171,6 +185,12 @@ RU_MESSAGES = {
         "НЕТ",
     "Nucleus: {spect_set} | Protocol: {protocol} (subtract C_m={apply_str}) | std_reg={std_reg}":
         "Ядро: {spect_set} | Протокол: {protocol} (вычитание C_m={apply_str}) | std_reg={std_reg}",
+    "Nucleus: {spect_set} | Loss: {loss_type} | Protocol: {protocol} (subtract C_m={apply_str}) | std_reg={std_reg}":
+        "Ядро: {spect_set} | Лосс: {loss_type} | Протокол: {protocol} (вычитание C_m={apply_str}) | std_reg={std_reg}",
+    "  [Metrics Ep {epoch_i:04d}] Appended metrics row to: {path} (te_mae={te_mae:.4f}, te_rmse={te_rmse:.4f}, te_nll={te_nll:.4f}, cov68={cov68:.3f}, cov95={cov95:.3f}, d_nu_raw={d_nu_raw:.2f})":
+        "  [Metrics Ep {epoch_i:04d}] Записана строка метрик в: {path} (te_mae={te_mae:.4f}, te_rmse={te_rmse:.4f}, te_nll={te_nll:.4f}, cov68={cov68:.3f}, cov95={cov95:.3f}, d_nu_raw={d_nu_raw:.2f})",
+    "Explicit loss type override (if omitted, inferred from metadata or filename)":
+        "Явное указание типа лосса (если не указано, определяется из метаданных или имени файла)",
     "Found existing prediction CSV files (model evaluation not required):":
         "Найдены готовые CSV-файлы предсказаний (расчет по модели не требуется):",
     "Neither prediction CSV files ({csv_path}) nor model weights file ({state_path}) were found.":

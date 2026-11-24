@@ -33,8 +33,16 @@ from i18n import _
 
 # === 1. COMMAND-LINE ARGUMENT PARSING ===
 parser = argparse.ArgumentParser(description=_("NMR GNN Training Pipeline"))
-parser.add_argument("--protocol", "--stage", dest="protocol", type=str, choices=["warmup", "molcalib", "auto"], default="auto", 
-                    help=_("Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib)"))
+parser.add_argument("--protocol", "--stage", dest="protocol", type=str, choices=["warmup", "molcalib", "auto"], default=None, 
+                    help=_("Training mode: warmup (mu+sigma), molcalib (+c_m), auto (warmup -> molcalib). Default: warmup for beta_nll, auto for nolog"))
+parser.add_argument("--loss", "--loss_type", dest="loss_type", type=str, choices=["beta_nll", "nolog"], default="beta_nll",
+                    help=_("Uncertainty loss function: beta_nll (Seitzer et al., ICLR 2022) or nolog (legacy Jonas & Kuhn). Default: beta_nll"))
+parser.add_argument("--beta", type=float, default=0.5,
+                    help=_("Beta exponent in [0, 1] for beta-NLL loss (0=standard NLL, 0.5=default, 1=MSE mean gradient)"))
+parser.add_argument("--init_std", type=float, default=None,
+                    help=_("Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: 13C=5.0, 1H=1.0"))
+parser.add_argument("--max_std", type=float, default=None,
+                    help=_("Maximum predicted std clamp (in ppm) for beta-NLL variance head. Default: 13C=100.0, 1H=10.0"))
 parser.add_argument("--weights", "--checkpoint", dest="weights", type=str, default="", 
                     help=_("Path to pre-trained weights file (.state or .model)"))
 parser.add_argument("--nucleus", "--nuc", dest="nucleus", type=str, choices=["13C", "1H"], default="13C", 
@@ -69,6 +77,14 @@ for u in unknown:
         k, v = u_clean.split("=", 1)
         if k in ("protocol", "stage"):
             args.protocol = v
+        elif k in ("loss", "loss_type"):
+            args.loss_type = v
+        elif k == "beta":
+            args.beta = float(v)
+        elif k == "init_std":
+            args.init_std = float(v)
+        elif k == "max_std":
+            args.max_std = float(v)
         elif k in ("weights", "checkpoint", "state"):
             args.weights = v
         elif k in ("nucleus", "nuc"):
@@ -89,6 +105,19 @@ for u in unknown:
             args.min_epochs = int(v)
     elif u not in ("--",):
         print(_("WARNING: Unrecognized command-line argument: '{arg}'", arg=u))
+
+LOSS_TYPE = args.loss_type
+BETA = float(args.beta)
+if LOSS_TYPE == "beta_nll" and not (0.0 <= BETA <= 1.0):
+    raise ValueError(_("ERROR: --beta must be in [0.0, 1.0], got {beta}", beta=BETA))
+
+if args.protocol is None:
+    args.protocol = "warmup" if LOSS_TYPE == "beta_nll" else "auto"
+
+if LOSS_TYPE == "beta_nll" and args.protocol != "warmup":
+    raise ValueError(
+        _("ERROR: --loss beta_nll is currently implemented for stage 'warmup' only. Pass --protocol warmup (or omit --protocol), or use --loss nolog for legacy molcalib/auto.")
+    )
 
 if args.protocol == "molcalib" and not args.weights:
     raise ValueError(
@@ -180,7 +209,8 @@ def load_pretrained_checkpoint(weights_path, net_params):
             try:
                 meta = json.load(open(cand, 'r')) if cand.endswith('.json') else pickle.load(open(cand, 'rb'))
                 if 'net_params' in meta:
-                    for k in ['int_d', 'layer_n', 'GS', 'agg_func', 'resnet', 'resnet_out', 'resnet_d', 'out_std']:
+                    for k in ['int_d', 'layer_n', 'GS', 'agg_func', 'resnet', 'resnet_out', 'resnet_d', 'out_std',
+                              'var_mode', 'init_var', 'min_var', 'max_var']:
                         if k in meta['net_params'] and net_params.get(k) != meta['net_params'][k]:
                             print(_("  [Checkpoint Meta] Updating net_params['{key}']: {old_val} -> {new_val}",
                                     key=k, old_val=net_params.get(k), new_val=meta['net_params'][k]))
@@ -279,6 +309,15 @@ def train(infile, outfile, seed):
     net_params['g_feature_n'] = g_feature_n
     net_params['OUT_DIM'] =  len(tgt_nucs)
 
+    if LOSS_TYPE == 'beta_nll':
+        min_std_ppm = float(STD_REGULARIZE)
+        init_std_ppm = float(args.init_std) if args.init_std is not None else (5.0 if SPECT_SET == '13C' else 1.0)
+        max_std_ppm = float(args.max_std) if args.max_std is not None else (100.0 if SPECT_SET == '13C' else 10.0)
+        net_params['var_mode'] = 'softplus_var'
+        net_params['min_var'] = min_std_ppm ** 2
+        net_params['init_var'] = init_std_ppm ** 2
+        net_params['max_var'] = max_std_ppm ** 2
+
     # === 2. MODEL INSTANTIATION & PRE-TRAINED WEIGHTS LOADING ===
     if LOAD_WEIGHTS:
         if not os.path.exists(LOAD_WEIGHTS):
@@ -290,11 +329,17 @@ def train(infile, outfile, seed):
 
     net = move(net, USE_CUDA)
 
-    loss_config = {'std_regularize' : STD_REGULARIZE, 
+    loss_config = {'loss_type' : LOSS_TYPE,
+                   'beta' : BETA if LOSS_TYPE == 'beta_nll' else 0.0,
+                   'std_regularize' : STD_REGULARIZE, 
                    'mu_scale' : mu_scale, 
                    'std_scale' : std_scale,
                    'cm_norm' : CM_NORM,
                    'lambda_penalty' : LAMBDA_PENALTY}
+    if LOSS_TYPE == 'beta_nll':
+        loss_config['min_var'] = net_params['min_var']
+        loss_config['init_var'] = net_params['init_var']
+        loss_config['max_var'] = net_params['max_var']
 
     mu_scale_t = move(torch.Tensor(loss_config['mu_scale']), USE_CUDA)
     std_scale_t = move(torch.Tensor(loss_config['std_scale']), USE_CUDA)
@@ -312,6 +357,7 @@ def train(infile, outfile, seed):
         
         stage_max_epochs = MAX_EPOCHS
         stage_min_epochs = args.min_epochs if args.min_epochs is not None else (50 if stage_protocol == 'warmup' else 20)
+        val_criterion = None
 
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
@@ -324,10 +370,22 @@ def train(infile, outfile, seed):
 
         else: # warmup
             opt_params['lr'] = args.lr if args.lr is not None else 1e-4
-            print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ===")
-            criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
-                                               std_regularize=loss_config['std_regularize'])
-            stage_max_epochs = 300
+            if LOSS_TYPE == 'beta_nll':
+                print(
+                    f"=== RUNNING STAGE: WARMUP (BETA-NLL, beta={BETA}, "
+                    f"min_std={np.sqrt(net_params['min_var']):.4g} ppm, "
+                    f"init_std={np.sqrt(net_params['init_var']):.4g} ppm, "
+                    f"max_std={np.sqrt(net_params['max_var']):.4g} ppm, "
+                    f"lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ==="
+                )
+                criterion = nets.BetaNLLLoss(beta=BETA, min_var=net_params['min_var'])
+                # Evaluate validation & early stopping with exact unweighted Gaussian NLL (beta=0.0)
+                val_criterion = nets.BetaNLLLoss(beta=0.0, min_var=net_params['min_var'])
+            else:
+                print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ===")
+                criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
+                                                   std_regularize=loss_config['std_regularize'])
+            stage_max_epochs = min(MAX_EPOCHS, 300)
 
         if args.smoke_test:
             stage_max_epochs = 2
@@ -345,7 +403,11 @@ def train(infile, outfile, seed):
                                                     step_size=opt_params['scheduler_step_size'], 
                                                     gamma=opt_params['scheduler_gamma'])
 
-        STAGE_MODEL_NAME = "{}_{}.{:08d}".format(EXP_NAME, stage_protocol, int(time.time() % 1e8))
+        if LOSS_TYPE == 'beta_nll':
+            beta_tag = f"b{str(BETA).replace('.', 'p')}"
+            STAGE_MODEL_NAME = "{}_{}_betanll_{}.{:08d}".format(EXP_NAME, stage_protocol, beta_tag, int(time.time() % 1e8))
+        else:
+            STAGE_MODEL_NAME = "{}_{}.{:08d}".format(EXP_NAME, stage_protocol, int(time.time() % 1e8))
         smoke_stage_names.append(STAGE_MODEL_NAME)
         checkpoint_base_prefix = os.path.join(CHECKPOINT_DIR, STAGE_MODEL_NAME)
         checkpoint_filename = checkpoint_base_prefix + ".{epoch_i:08d}"
@@ -372,7 +434,9 @@ def train(infile, outfile, seed):
                 use_cuda=USE_CUDA,
                 test_res=test_res,
                 cm_norm=CM_NORM,
-                lambda_penalty=LAMBDA_PENALTY if _stage == 'molcalib' else 0.0
+                lambda_penalty=LAMBDA_PENALTY if _stage == 'molcalib' else 0.0,
+                loss_type=LOSS_TYPE,
+                beta=BETA if LOSS_TYPE == 'beta_nll' else 0.0
             )
 
         writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
@@ -398,7 +462,8 @@ def train(infile, outfile, seed):
                                                 plot_func=plot_every_10_epochs,
                                                 stage=stage_protocol,
                                                 max_d_nu=args.max_d_nu,
-                                                min_epochs=stage_min_epochs)
+                                                min_epochs=stage_min_epochs,
+                                                val_criterion=val_criterion)
         writer.close()
 
         best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")
