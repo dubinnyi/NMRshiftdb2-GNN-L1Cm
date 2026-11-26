@@ -9,3 +9,4 @@ logs.13C/
 *.out
 *.json
 *.meta
+nmrshiftdb2/*.sd
