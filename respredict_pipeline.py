@@ -82,7 +82,11 @@ parser.add_argument("--lr", type=float, default=None,
 parser.add_argument("--max_d_nu", type=float, default=0.42,
                     help=_("Allowed per-stage increase in Student-t df divergence (df_train - df_test). Default: 0.42 (two-stage cap <= 0.84)"))
 parser.add_argument("--min_epochs", type=int, default=None,
-                    help=_("Minimum number of base training epochs before early stopping is armed (default: warmup=50, molcalib=20)"))
+                    help=_("Minimum number of base training epochs before early stopping is armed (default: v2 warmup=10, legacy warmup=50, molcalib=20)"))
+parser.add_argument("--eval_every", type=int, default=None,
+                    help=_("Evaluate validation metrics and Student-t parameters every N epochs (default: v2=1, legacy=5)"))
+parser.add_argument("--plot_every", type=int, default=None,
+                    help=_("Save full prediction CSVs and Z-score/Stats PNG plots every N epochs (default: v2=5, legacy=10)"))
 args, unknown = parser.parse_known_args()
 
 # Support key=value arguments passed without leading dashes (e.g. checkpoint=... stage=... nuc=...)
@@ -130,6 +134,10 @@ for u in unknown:
             args.max_d_nu = float(v)
         elif k == "min_epochs":
             args.min_epochs = int(v)
+        elif k == "eval_every":
+            args.eval_every = int(v)
+        elif k == "plot_every":
+            args.plot_every = int(v)
     elif u not in ("--",):
         print(_("WARNING: Unrecognized command-line argument: '{arg}'", arg=u))
 
@@ -433,18 +441,26 @@ def train(infile, outfile, seed):
 
     smoke_stage_names = []
 
+    EVAL_EVERY = args.eval_every if args.eval_every is not None else (1 if ARCH == 'v2' else 5)
+    PLOT_EVERY = args.plot_every if args.plot_every is not None else (5 if ARCH == 'v2' else 10)
+    MAX_D_NU = args.max_d_nu
+    MIN_TE_NU = 2.5 if ARCH == 'v2' else 2.0
+    DF_PATIENCE = 3 if ARCH == 'v2' else 2
+    ES_PATIENCE = 15 if ARCH == 'v2' else 20
+
     # === 3. SEQUENTIAL STAGE EXECUTION ===
     for stage_protocol in protocols_to_run:
         opt_params = opt_params_base.copy()
         
         stage_max_epochs = MAX_EPOCHS
-        stage_min_epochs = args.min_epochs if args.min_epochs is not None else (50 if stage_protocol == 'warmup' else 20)
+        default_min_ep = (10 if ARCH == 'v2' else 50) if stage_protocol == 'warmup' else 20
+        stage_min_epochs = args.min_epochs if args.min_epochs is not None else default_min_ep
         val_criterion = None
 
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
             opt_params['lr'] = args.lr if args.lr is not None else 3e-5
-            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ===")
+            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={MAX_D_NU}, min_epochs={stage_min_epochs}) ===")
             criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
                                                           std_regularize=loss_config['std_regularize'],
                                                           lambda_penalty=LAMBDA_PENALTY,
@@ -463,13 +479,14 @@ def train(infile, outfile, seed):
                     f"min_std={np.sqrt(net_params['min_var']):.4g} ppm, "
                     f"init_std={np.sqrt(net_params['init_var']):.4g} ppm, "
                     f"max_std={np.sqrt(net_params['max_var']):.4g} ppm, "
-                    f"lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ==="
+                    f"lr={opt_params['lr']}, eval_every={EVAL_EVERY}, plot_every={PLOT_EVERY}, "
+                    f"max_d_nu={MAX_D_NU}, min_te_nu={MIN_TE_NU}, min_epochs={stage_min_epochs}) ==="
                 )
                 criterion = nets.BetaNLLLoss(beta=BETA, min_var=net_params['min_var'])
                 # Evaluate validation & early stopping with exact unweighted Gaussian NLL (beta=0.0)
                 val_criterion = nets.BetaNLLLoss(beta=0.0, min_var=net_params['min_var'])
             else:
-                print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={args.max_d_nu}, min_epochs={stage_min_epochs}) ===")
+                print(f"=== RUNNING STAGE: WARMUP (STANDARD, lr={opt_params['lr']}, max_d_nu={MAX_D_NU}, min_epochs={stage_min_epochs}) ===")
                 criterion = nets.NormUncertainLoss(mu_scale_t, std_scale_t,
                                                    std_regularize=loss_config['std_regularize'])
             stage_max_epochs = min(MAX_EPOCHS, 300)
@@ -503,10 +520,10 @@ def train(infile, outfile, seed):
         print("Metrics CSV file:   ", f"{checkpoint_base_prefix}_metrics.csv")
         checkpoint_func = graph_conv_many_nuc_util.create_checkpoint_func(50, checkpoint_filename)
 
-        # Callback to export prediction CSVs, log epoch metrics, and generate plots every 10 epochs
-        def plot_every_10_epochs(epoch_i, net, test_res=None,
-                                 _prefix=checkpoint_base_prefix, _stage=stage_protocol):
-            if epoch_i % 10 != 0:
+        # Callback to log epoch metrics every EVAL_EVERY epochs and save CSV/PNG artifacts every PLOT_EVERY epochs
+        def eval_and_plot_epoch(epoch_i, net, test_res=None,
+                                _prefix=checkpoint_base_prefix, _stage=stage_protocol):
+            if epoch_i % EVAL_EVERY != 0:
                 return None
             return plot_z_score.save_csv_and_plot_epoch(
                 net=net,
@@ -524,7 +541,8 @@ def train(infile, outfile, seed):
                 cm_norm=CM_NORM,
                 lambda_penalty=LAMBDA_PENALTY if _stage == 'molcalib' else 0.0,
                 loss_type=LOSS_TYPE,
-                beta=BETA if LOSS_TYPE == 'beta_nll' else 0.0
+                beta=BETA if LOSS_TYPE == 'beta_nll' else 0.0,
+                save_artifacts=(epoch_i % PLOT_EVERY == 0),
             )
 
         writer = SummaryWriter("{}/{}".format(TENSORBOARD_DIR, STAGE_MODEL_NAME))
@@ -548,11 +566,15 @@ def train(infile, outfile, seed):
                                                 USE_CUDA=USE_CUDA, writer=writer, 
                                                 validate_func= validate_func, 
                                                 checkpoint_func= checkpoint_func,
-                                                plot_func=plot_every_10_epochs,
+                                                plot_func=eval_and_plot_epoch,
                                                 stage=stage_protocol,
-                                                max_d_nu=args.max_d_nu,
+                                                max_d_nu=MAX_D_NU,
+                                                df_patience=DF_PATIENCE,
+                                                min_te_nu=MIN_TE_NU,
                                                 min_epochs=stage_min_epochs,
-                                                val_criterion=val_criterion)
+                                                val_criterion=val_criterion,
+                                                eval_every=EVAL_EVERY,
+                                                patience=ES_PATIENCE)
         writer.close()
 
         best_state_path = os.path.join(CHECKPOINT_DIR, f"{STAGE_MODEL_NAME}.best.state")

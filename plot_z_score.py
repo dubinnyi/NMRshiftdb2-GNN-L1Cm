@@ -253,15 +253,16 @@ def compute_and_append_epoch_metrics(res_train_df, res_test_df, epoch_i,
         z_raw = (delta_raw / std_real).replace([np.inf, -np.inf], np.nan).dropna().values
         z_cal = (delta_cal / std_real).replace([np.inf, -np.inf], np.nan).dropna().values
 
-        if len(z_raw) >= 2:
-            nu_raw, loc_raw, sc_raw = stats.t.fit(z_raw)
-        else:
-            nu_raw, loc_raw, sc_raw = np.nan, np.nan, np.nan
+        def _fast_t_fit(arr):
+            if len(arr) < 2:
+                return np.nan, np.nan, np.nan
+            if len(arr) > 50000:
+                idx = np.random.RandomState(42).choice(len(arr), size=50000, replace=False)
+                arr = arr[idx]
+            return stats.t.fit(arr)
 
-        if len(z_cal) >= 2:
-            nu_cal, loc_cal, sc_cal = stats.t.fit(z_cal)
-        else:
-            nu_cal, loc_cal, sc_cal = np.nan, np.nan, np.nan
+        nu_raw, loc_raw, sc_raw = _fast_t_fit(z_raw)
+        nu_cal, loc_cal, sc_cal = _fast_t_fit(z_cal)
 
         if loss_type == 'beta_nll':
             # Exact unweighted Gaussian NLL in nats (Seitzer et al., Sec. 4.1)
@@ -391,13 +392,13 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
                             checkpoint_prefix, epoch_i, std_reg, protocol,
                             spect_set, plots_dir=None, use_cuda=True,
                             test_res=None, cm_norm="L2", lambda_penalty=0.0,
-                            loss_type="nolog", beta=0.0):
+                            loss_type="nolog", beta=0.0, save_artifacts=True):
     """
-    Called at the end of every N-th training epoch (e.g. every 10 epochs):
-    1) Evaluates train and test predictions in memory (without saving heavy .state/.model files);
-    2) Saves lightweight prediction CSV files (*_preds_train.csv and *_preds_test.csv);
-    3) Appends a summary row of metrics and Student-t parameters to <checkpoint_prefix>_metrics.csv;
-    4) Generates and saves Z-score and Sigma / C_m distribution plots.
+    Called on evaluation epochs:
+    1) Evaluates train and test predictions in memory (reusing test_res if provided);
+    2) Always appends a summary row of metrics and Student-t parameters to <checkpoint_prefix>_metrics.csv;
+    3) When save_artifacts=True, saves prediction CSV files (*_preds_train.csv, *_preds_test.csv)
+       and generates Z-score and Sigma / C_m distribution plots.
     Returns the computed metrics dictionary (metrics_row) for use in EarlyStopping.
     """
     epoch_str = f"{epoch_i:08d}"
@@ -427,11 +428,12 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
     res_train_df = epoch_res_to_df(train_eval_res, tgt_nucs)
     res_test_df = epoch_res_to_df(test_eval_res, tgt_nucs)
 
-    os.makedirs(os.path.dirname(os.path.abspath(csv_train_path)), exist_ok=True)
-    res_train_df.to_csv(csv_train_path, index=False)
-    res_test_df.to_csv(csv_test_path, index=False)
-    print(_("  [Plot/CSV Ep {epoch_i:04d}] Saved CSVs: {train_path}, {test_path}",
-            epoch_i=epoch_i, train_path=csv_train_path, test_path=csv_test_path))
+    if save_artifacts:
+        os.makedirs(os.path.dirname(os.path.abspath(csv_train_path)), exist_ok=True)
+        res_train_df.to_csv(csv_train_path, index=False)
+        res_test_df.to_csv(csv_test_path, index=False)
+        print(_("  [Plot/CSV Ep {epoch_i:04d}] Saved CSVs: {train_path}, {test_path}",
+                epoch_i=epoch_i, train_path=csv_train_path, test_path=csv_test_path))
 
     metrics_row = compute_and_append_epoch_metrics(
         res_train_df, res_test_df,
@@ -446,24 +448,25 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
         beta=beta
     )
 
-    if plots_dir is None:
-        plots_dir = f"plots_{spect_set}"
-    else:
-        plots_dir = plots_dir.replace("{NUC}", spect_set)
-    os.makedirs(plots_dir, exist_ok=True)
+    if save_artifacts:
+        if plots_dir is None:
+            plots_dir = f"plots_{spect_set}"
+        else:
+            plots_dir = plots_dir.replace("{NUC}", spect_set)
+        os.makedirs(plots_dir, exist_ok=True)
 
-    stage_model_name = os.path.basename(checkpoint_prefix)
-    out_file_z = os.path.join(plots_dir, f"{stage_model_name}.zscore.{epoch_str}.png")
-    out_file_stats = os.path.join(plots_dir, f"{stage_model_name}.stats.{epoch_str}.png")
+        stage_model_name = os.path.basename(checkpoint_prefix)
+        out_file_z = os.path.join(plots_dir, f"{stage_model_name}.zscore.{epoch_str}.png")
+        out_file_stats = os.path.join(plots_dir, f"{stage_model_name}.stats.{epoch_str}.png")
 
-    apply_cm = (protocol == "molcalib")
-    plot_from_dataframes(
-        res_train_df, res_test_df,
-        std_reg=std_reg, apply_cm=apply_cm, spect_set=spect_set,
-        out_file_z=out_file_z, out_file_stats=out_file_stats,
-        title_label=f"{stage_model_name}.{epoch_str}",
-        loss_type=loss_type
-    )
+        apply_cm = (protocol == "molcalib")
+        plot_from_dataframes(
+            res_train_df, res_test_df,
+            std_reg=std_reg, apply_cm=apply_cm, spect_set=spect_set,
+            out_file_z=out_file_z, out_file_stats=out_file_stats,
+            title_label=f"{stage_model_name}.{epoch_str}",
+            loss_type=loss_type
+        )
 
     return metrics_row
 

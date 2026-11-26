@@ -81,8 +81,12 @@ RU_MESSAGES = {
         "Явный шаг обучения (learning rate). По умолчанию: v2=5e-4, legacy warmup=1e-4, molcalib=3e-5",
     "Allowed per-stage increase in Student-t df divergence (df_train - df_test). Default: 0.42 (two-stage cap <= 0.84)":
         "Допустимый прирост разницы степеней свободы Стьюдента (df_train - df_test) на один этап (по умолчанию: 0.42, суммарно за два этапа <= 0.84)",
-    "Minimum number of base training epochs before early stopping is armed (default: warmup=50, molcalib=20)":
-        "Минимальное число эпох базового обучения до включения критериев остановки (по умолчанию: warmup=50, molcalib=20)",
+    "Minimum number of base training epochs before early stopping is armed (default: v2 warmup=10, legacy warmup=50, molcalib=20)":
+        "Минимальное число эпох базового обучения до включения критериев остановки (по умолчанию: v2 warmup=10, legacy warmup=50, molcalib=20)",
+    "Evaluate validation metrics and Student-t parameters every N epochs (default: v2=1, legacy=5)":
+        "Вычислять метрики валидации и параметры Стьюдента каждые N эпох (по умолчанию: v2=1, legacy=5)",
+    "Save full prediction CSVs and Z-score/Stats PNG plots every N epochs (default: v2=5, legacy=10)":
+        "Сохранять полные CSV предсказаний и PNG-графики Z-score/Stats каждые N эпох (по умолчанию: v2=5, legacy=10)",
     "WARNING: Unrecognized command-line argument: '{arg}'":
         "WARNING: Нераспознанный аргумент командной строки: '{arg}'",
     "ERROR: Stage 'molcalib' requires a pre-trained checkpoint path via --weights <path> or --checkpoint <path> (or use --protocol auto for the full warmup -> molcalib cycle).":

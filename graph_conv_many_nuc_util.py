@@ -335,9 +335,12 @@ def generic_runner(net, optimizer, scheduler, criterion,
                    df_patience=2,
                    min_te_nu=2.0,
                    min_epochs=None,
-                   val_criterion=None):
+                   val_criterion=None,
+                   eval_every=5,
+                   patience=20):
 
     eval_criterion = val_criterion if val_criterion is not None else criterion
+    eval_every = max(1, int(eval_every))
 
     # GradScaler is only needed for float16 (bfloat16 has full float32 exponent range)
     use_bf16 = (USE_CUDA and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
@@ -349,13 +352,14 @@ def generic_runner(net, optimizer, scheduler, criterion,
     # Initialize early stopping with Student-t df divergence (d_nu = df_train - df_test) monitoring
     # and a minimum base training period (min_epochs) before stopping rules become active.
     early_stopping = EarlyStopping(
-        patience=20,
+        patience=patience,
         min_delta=1e-4,
         stage=stage,
         max_d_nu=max_d_nu,
         df_patience=df_patience,
         min_te_nu=min_te_nu,
-        min_epochs=min_epochs
+        min_epochs=min_epochs,
+        eval_every=eval_every,
     )
 
     # Keep a snapshot of the last known finite weights so any transient numerical spike can be recovered
@@ -402,7 +406,7 @@ def generic_runner(net, optimizer, scheduler, criterion,
 
         test_res = None
         val_metrics = {}
-        if epoch_i % 5 == 0:
+        if epoch_i % eval_every == 0:
             net.eval()
             with torch.no_grad():
                 test_res = run_epoch(net, optimizer, eval_criterion, dl_test, 
@@ -425,10 +429,10 @@ def generic_runner(net, optimizer, scheduler, criterion,
             checkpoint_func(epoch_i = epoch_i, net =net, optimizer=optimizer)
 
         metrics_row = None
-        if plot_func is not None:
+        if plot_func is not None and (epoch_i % eval_every == 0):
             metrics_row = plot_func(epoch_i = epoch_i, net = net, test_res = test_res)
 
-        if epoch_i % 5 == 0 and test_res is not None:
+        if epoch_i % eval_every == 0 and test_res is not None:
             test_pts = test_res['total_points']
             test_loss = float(test_res['running_loss'] / test_pts) if test_pts > 0 else float('nan')
             # During molcalib fine-tuning, select best_state using calibrated pattern MAE
@@ -619,7 +623,7 @@ class EarlyStopping:
        updating best_state only while d_nu remains within the valid threshold.
     """
     def __init__(self, patience=20, min_delta=1e-4, stage='warmup',
-                 max_d_nu=0.42, df_patience=2, min_te_nu=2.0, min_epochs=0):
+                 max_d_nu=0.42, df_patience=2, min_te_nu=2.0, min_epochs=0, eval_every=5):
         self.patience = patience
         self.min_delta = min_delta
         self.stage = stage
@@ -627,6 +631,7 @@ class EarlyStopping:
         self.df_patience = df_patience
         self.min_te_nu = min_te_nu
         self.min_epochs = min_epochs
+        self.eval_every = max(1, int(eval_every))
 
         self.counter = 0
         self.df_counter = 0
@@ -753,5 +758,5 @@ class EarlyStopping:
                     self.early_stop = True
                     self.stop_reason = _(
                         "{metric_name} did not improve for the last {epochs} epochs.",
-                        metric_name=self.metric_name, epochs=self.patience * 5
+                        metric_name=self.metric_name, epochs=self.patience * self.eval_every
                     )
