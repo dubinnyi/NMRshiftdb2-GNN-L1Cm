@@ -128,7 +128,7 @@ def main():
     parser.add_argument("--max_epochs", type=int, default=30)
     parser.add_argument("--init_std_13c", type=float, default=2.5)
     parser.add_argument("--init_std_1h", type=float, default=1.0)
-    parser.add_argument("--plot_every", type=int, default=10)
+    parser.add_argument("--plot_every", type=int, default=5)
     parser.add_argument("--full_grid", action="store_true",
                         help="Run full 4x3=12 grid instead of the 6-point focused grid")
     parser.add_argument("--out_csv", type=str, default="sweep_reg_results.csv")

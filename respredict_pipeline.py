@@ -90,7 +90,7 @@ parser.add_argument("--min_epochs", type=int, default=None,
 parser.add_argument("--eval_every", type=int, default=None,
                     help=_("Evaluate validation metrics and Student-t parameters every N epochs (default: v2=1, legacy=5)"))
 parser.add_argument("--plot_every", type=int, default=None,
-                    help=_("Save full prediction CSVs and Z-score/Stats PNG plots every N epochs (default: v2=5, legacy=10)"))
+                    help=_("Save full prediction CSVs and Z-score/Stats PNG plots every N epochs (default: 5)"))
 args, unknown = parser.parse_known_args()
 
 # Support key=value arguments passed without leading dashes (e.g. checkpoint=... stage=... nuc=...)
@@ -161,11 +161,6 @@ if LOSS_TYPE == "beta_nll" and not (0.0 <= BETA <= 1.0):
 
 if args.protocol is None:
     args.protocol = "warmup" if LOSS_TYPE == "beta_nll" else "auto"
-
-if LOSS_TYPE == "beta_nll" and args.protocol != "warmup":
-    raise ValueError(
-        _("ERROR: --loss beta_nll is currently implemented for stage 'warmup' only. Pass --protocol warmup (or omit --protocol), or use --loss nolog for legacy molcalib/auto.")
-    )
 
 if args.protocol == "molcalib" and not args.weights:
     raise ValueError(
@@ -452,7 +447,7 @@ def train(infile, outfile, seed):
     smoke_stage_names = []
 
     EVAL_EVERY = args.eval_every if args.eval_every is not None else (1 if ARCH == 'v2' else 5)
-    PLOT_EVERY = args.plot_every if args.plot_every is not None else (5 if ARCH == 'v2' else 10)
+    PLOT_EVERY = args.plot_every if args.plot_every is not None else 5
     MAX_D_NU = args.max_d_nu
     MIN_TE_NU = 2.5 if ARCH == 'v2' else 2.0
     DF_PATIENCE = 3 if ARCH == 'v2' else 2
@@ -474,11 +469,30 @@ def train(infile, outfile, seed):
         print("\n" + "="*60)
         if stage_protocol == 'molcalib':
             opt_params['lr'] = args.lr if args.lr is not None else 3e-5
-            print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={MAX_D_NU}, min_epochs={stage_min_epochs}) ===")
-            criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
-                                                          std_regularize=loss_config['std_regularize'],
-                                                          lambda_penalty=LAMBDA_PENALTY,
-                                                          cm_norm=CM_NORM)
+            if LOSS_TYPE == 'beta_nll':
+                print(
+                    f"=== RUNNING STAGE: MOLCALIB ({net_name}, BETA-NLL, beta={BETA}, norm={CM_NORM}, "
+                    f"lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, eval_every={EVAL_EVERY}, "
+                    f"max_d_nu={MAX_D_NU}, min_te_nu={MIN_TE_NU}, min_epochs={stage_min_epochs}) ==="
+                )
+                criterion = nets.BetaNLLCalibrationLoss(
+                    beta=BETA,
+                    min_var=net_params['min_var'],
+                    lambda_penalty=LAMBDA_PENALTY,
+                    cm_norm=CM_NORM,
+                )
+                val_criterion = nets.BetaNLLCalibrationLoss(
+                    beta=0.0,
+                    min_var=net_params['min_var'],
+                    lambda_penalty=LAMBDA_PENALTY,
+                    cm_norm=CM_NORM,
+                )
+            else:
+                print(f"=== RUNNING STAGE: MOLCALIB (FINE-TUNING, norm={CM_NORM}, lambda={LAMBDA_PENALTY}, lr={opt_params['lr']}, max_d_nu={MAX_D_NU}, min_epochs={stage_min_epochs}) ===")
+                criterion = nets.NormUncertainCalibrationLoss(mu_scale_t, std_scale_t,
+                                                              std_regularize=loss_config['std_regularize'],
+                                                              lambda_penalty=LAMBDA_PENALTY,
+                                                              cm_norm=CM_NORM)
 
         else: # warmup
             default_warmup_lr = 5e-4 if ARCH == 'v2' else 1e-4
@@ -604,6 +618,30 @@ def train(infile, outfile, seed):
             torch.save(net, best_model_path)
         print(_("Final weights for stage {stage} saved to:\n  {state_path}\n  {model_path}",
                 stage=stage_protocol, state_path=best_state_path, model_path=best_model_path))
+
+        # Automatically generate prediction CSVs and Z-score / Stats plots for the restored .best model
+        if not args.smoke_test:
+            plot_z_score.save_csv_and_plot_epoch(
+                net=net,
+                dl_train_eval=dl_train_eval,
+                dl_test_eval=dl_test_eval,
+                tgt_nucs=tgt_nucs,
+                checkpoint_prefix=checkpoint_base_prefix,
+                epoch_i=0,
+                std_reg=loss_config['std_regularize'],
+                protocol=stage_protocol,
+                spect_set=SPECT_SET,
+                plots_dir=f"plots_{SPECT_SET}",
+                use_cuda=USE_CUDA,
+                test_res=None,
+                cm_norm=CM_NORM,
+                lambda_penalty=LAMBDA_PENALTY if stage_protocol == 'molcalib' else 0.0,
+                loss_type=LOSS_TYPE,
+                beta=BETA if LOSS_TYPE == 'beta_nll' else 0.0,
+                save_artifacts=True,
+                epoch_label="best",
+                append_metrics=False,
+            )
 
     if args.smoke_test:
         print(_("\n[SMOKE TEST] Test completed without errors. Automatically cleaning up temporary files..."))

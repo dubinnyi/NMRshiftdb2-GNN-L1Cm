@@ -392,20 +392,26 @@ def save_csv_and_plot_epoch(net, dl_train_eval, dl_test_eval, tgt_nucs,
                             checkpoint_prefix, epoch_i, std_reg, protocol,
                             spect_set, plots_dir=None, use_cuda=True,
                             test_res=None, cm_norm="L2", lambda_penalty=0.0,
-                            loss_type="nolog", beta=0.0, save_artifacts=True):
+                            loss_type="nolog", beta=0.0, save_artifacts=True,
+                            epoch_label=None, append_metrics=True):
     """
-    Called on evaluation epochs:
+    Called on evaluation epochs (or for the final '.best' model):
     1) Evaluates train and test predictions in memory (reusing test_res if provided);
-    2) Always appends a summary row of metrics and Student-t parameters to <checkpoint_prefix>_metrics.csv;
+    2) When append_metrics=True, appends a summary row of metrics and Student-t parameters
+       to <checkpoint_prefix>_metrics.csv;
     3) When save_artifacts=True, saves prediction CSV files (*_preds_train.csv, *_preds_test.csv)
        and generates Z-score and Sigma / C_m distribution plots.
     Returns the computed metrics dictionary (metrics_row) for use in EarlyStopping.
     """
-    epoch_str = f"{epoch_i:08d}"
+    epoch_str = str(epoch_label) if epoch_label is not None else f"{epoch_i:08d}"
     base_with_epoch = f"{checkpoint_prefix}.{epoch_str}"
-    csv_train_path = f"{base_with_epoch}_preds_train.csv"
-    csv_test_path = f"{base_with_epoch}_preds_test.csv"
-    metrics_csv_path = f"{checkpoint_prefix}_metrics.csv"
+    if epoch_label is not None:
+        csv_train_path = f"{checkpoint_prefix}.{epoch_str}_preds_train.csv"
+        csv_test_path = f"{checkpoint_prefix}.{epoch_str}_preds_test.csv"
+    else:
+        csv_train_path = f"{base_with_epoch}_preds_train.csv"
+        csv_test_path = f"{base_with_epoch}_preds_test.csv"
+    metrics_csv_path = f"{checkpoint_prefix}_metrics.csv" if append_metrics else None
 
     net.eval()
     with torch.no_grad():

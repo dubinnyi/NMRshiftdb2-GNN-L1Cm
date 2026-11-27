@@ -905,6 +905,56 @@ class BetaNLLLoss(nn.Module):
         return train_loss, true_nll, zero_pen
 
 
+class BetaNLLCalibrationLoss(BetaNLLLoss):
+    """
+    MolCalib stage loss for beta-NLL / NMRResPredictV2:
+      1) Computes inverse-variance weighted per-molecule shift c_m (in ppm, with gradients wrt mu):
+             c_m = sum_i(w_i * (y_i - mu_i)) / sum_i(w_i),   w_i = 1 / sg[var_i]
+      2) Evaluates heteroscedastic beta-NLL on calibrated shifts mu_cal = mu + sg[c_m]
+      3) Adds physical-unit regularization lambda_penalty * mean(|c_m|) [L1] or mean(c_m^2) [L2].
+    Supports both single-head and multi-head bootstrap ensembles.
+    """
+    def __init__(self, beta=0.5, min_var=1e-4, lambda_penalty=1.0, cm_norm="L2", include_const=True):
+        super(BetaNLLCalibrationLoss, self).__init__(beta=beta, min_var=min_var, include_const=include_const)
+        self.lambda_penalty = float(lambda_penalty)
+        self.cm_norm = str(cm_norm).upper()
+
+    def _compute_calib_loss(self, mu, var, y, eff_mask):
+        var = torch.clamp(var, min=self.min_var)
+        w = (1.0 / var.detach()) * eff_mask
+        delta = (y - mu) * eff_mask
+        sum_w = w.sum(dim=-2, keepdim=True)
+        active_mols = (sum_w > 0).float()
+        c_m = ((delta * w).sum(dim=-2, keepdim=True) / torch.clamp(sum_w, min=1e-8)) * active_mols
+
+        mu_calib = mu + c_m.detach()
+        train_nll, true_nll = self._compute_loss(mu_calib, var, y, eff_mask)
+
+        mol_denom = torch.clamp(active_mols.sum(), min=1.0)
+        if self.cm_norm == "L1":
+            c_m_penalty = (c_m.abs() * active_mols).sum() / mol_denom
+        else:
+            c_m_penalty = ((c_m ** 2) * active_mols).sum() / mol_denom
+
+        total_loss = train_nll + self.lambda_penalty * c_m_penalty
+        return total_loss, true_nll, c_m_penalty
+
+    def forward(self, pred, y, mask):
+        y = y.float()
+        mask = mask.float()
+
+        if pred.get('is_training', False) and ('head_mu' in pred) and ('head_var' in pred):
+            head_mu = pred['head_mu'].float()
+            head_var = pred['head_var'].float()
+            head_mask = pred['head_mask'].float()
+            eff_mask = mask.unsqueeze(0) * head_mask[:, :, None, None]
+            return self._compute_calib_loss(head_mu, head_var, y.unsqueeze(0), eff_mask)
+
+        mu = pred['mu'].float()
+        var = pred['var'].float() if 'var' in pred else (pred['std'].float() ** 2)
+        return self._compute_calib_loss(mu, var, y, mask)
+
+
 # ==============================================================================
 # NMRResPredictV2: Lightweight Williams & Jonas (2023) Polynomial GNN
 #                  + 3D Spatial RBF Message Passing

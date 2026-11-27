@@ -10,3 +10,4 @@ logs.13C/
 *.json
 *.meta
 nmrshiftdb2/*.sd
+sweep_best_*/

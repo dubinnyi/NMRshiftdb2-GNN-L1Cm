@@ -89,8 +89,8 @@ RU_MESSAGES = {
         "Минимальное число эпох базового обучения до включения критериев остановки (по умолчанию: v2 warmup=10, legacy warmup=50, molcalib=20)",
     "Evaluate validation metrics and Student-t parameters every N epochs (default: v2=1, legacy=5)":
         "Вычислять метрики валидации и параметры Стьюдента каждые N эпох (по умолчанию: v2=1, legacy=5)",
-    "Save full prediction CSVs and Z-score/Stats PNG plots every N epochs (default: v2=5, legacy=10)":
-        "Сохранять полные CSV предсказаний и PNG-графики Z-score/Stats каждые N эпох (по умолчанию: v2=5, legacy=10)",
+    "Save full prediction CSVs and Z-score/Stats PNG plots every N epochs (default: 5)":
+        "Сохранять полные CSV предсказаний и PNG-графики Z-score/Stats каждые N эпох (по умолчанию: 5)",
     "WARNING: Unrecognized command-line argument: '{arg}'":
         "WARNING: Нераспознанный аргумент командной строки: '{arg}'",
     "ERROR: Stage 'molcalib' requires a pre-trained checkpoint path via --weights <path> or --checkpoint <path> (or use --protocol auto for the full warmup -> molcalib cycle).":
