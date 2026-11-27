@@ -47,8 +47,12 @@ RU_MESSAGES = {
         "Размер батча обучения (по умолчанию: 32 для v2, 16 для legacy)",
     "Disable 3D spatial features in v2 (ablation: pure 2D + rich chemical + CH2 features)":
         "Отключить 3D-пространственные признаки в v2 (абляция: чистый 2D + расширенные химические + CH2 признаки)",
-    "Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: 13C=5.0, 1H=1.0":
-        "Начальная предсказываемая std (в ppm) для softplus-головы дисперсии beta-NLL. По умолчанию: 13C=5.0, 1H=1.0",
+    "Dropout rate for v2 GNN and readout heads (default: 0.05)":
+        "Коэффициент dropout для слоев GNN и голов v2 (по умолчанию: 0.05)",
+    "Adam weight decay (L2 regularization) (default: v2=1e-4, legacy=1e-6)":
+        "Параметр weight decay (L2-регуляризация) для Adam (по умолчанию: v2=1e-4, legacy=1e-6)",
+    "Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: v2 13C=2.5, legacy 13C=5.0, 1H=1.0":
+        "Начальная предсказываемая std (в ppm) для softplus-головы дисперсии beta-NLL. По умолчанию: v2 13C=2.5, legacy 13C=5.0, 1H=1.0",
     "Maximum predicted std clamp (in ppm) for beta-NLL variance head. Default: 13C=100.0, 1H=10.0":
         "Максимальное ограничение std (в ppm) для головы дисперсии beta-NLL. По умолчанию: 13C=100.0, 1H=10.0",
     "ERROR: --arch v2 (NMRResPredictV2) requires --loss beta_nll. Use --arch legacy --loss nolog for the original Jonas & Kuhn model.":

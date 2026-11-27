@@ -54,8 +54,12 @@ parser.add_argument("--batch_size", type=int, default=None,
                     help=_("Training batch size (default: 32 for v2, 16 for legacy)"))
 parser.add_argument("--no_3d", action="store_true",
                     help=_("Disable 3D spatial features in v2 (ablation: pure 2D + rich chemical + CH2 features)"))
+parser.add_argument("--dropout", type=float, default=None,
+                    help=_("Dropout rate for v2 GNN and readout heads (default: 0.05)"))
+parser.add_argument("--weight_decay", type=float, default=None,
+                    help=_("Adam weight decay (L2 regularization) (default: v2=1e-4, legacy=1e-6)"))
 parser.add_argument("--init_std", type=float, default=None,
-                    help=_("Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: 13C=5.0, 1H=1.0"))
+                    help=_("Initial predicted std (in ppm) for beta-NLL softplus variance head. Default: v2 13C=2.5, legacy 13C=5.0, 1H=1.0"))
 parser.add_argument("--max_std", type=float, default=None,
                     help=_("Maximum predicted std clamp (in ppm) for beta-NLL variance head. Default: 13C=100.0, 1H=10.0"))
 parser.add_argument("--weights", "--checkpoint", dest="weights", type=str, default="", 
@@ -112,6 +116,10 @@ for u in unknown:
             args.layer_n = int(v)
         elif k == "batch_size":
             args.batch_size = int(v)
+        elif k == "dropout":
+            args.dropout = float(v)
+        elif k == "weight_decay":
+            args.weight_decay = float(v)
         elif k == "init_std":
             args.init_std = float(v)
         elif k == "max_std":
@@ -368,11 +376,13 @@ def train(infile, outfile, seed):
     dl_test_eval = DataLoader(ds_test, batch_size=64, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
 
     min_std_ppm = float(STD_REGULARIZE)
-    init_std_ppm = float(args.init_std) if args.init_std is not None else (5.0 if SPECT_SET == '13C' else 1.0)
+    default_init_std_13c = 2.5 if ARCH == 'v2' else 5.0
+    init_std_ppm = float(args.init_std) if args.init_std is not None else (default_init_std_13c if SPECT_SET == '13C' else 1.0)
     max_std_ppm = float(args.max_std) if args.max_std is not None else (100.0 if SPECT_SET == '13C' else 10.0)
 
     if ARCH == 'v2':
         net_name = 'NMRResPredictV2'
+        v2_dropout = float(args.dropout) if args.dropout is not None else 0.05
         net_params = {
             'g_feature_n': g_feature_n,
             'int_d': args.int_d,
@@ -381,7 +391,7 @@ def train(infile, outfile, seed):
             'OUT_DIM': len(tgt_nucs),
             'spatial_dim': spatial_dim,
             'spatial_hidden': 64,
-            'dropout': 0.01,
+            'dropout': v2_dropout,
             'resnet_d': 128,
             'resnet_depth': 3,
             'mixture_n': args.mixture_n,
@@ -451,6 +461,10 @@ def train(infile, outfile, seed):
     # === 3. SEQUENTIAL STAGE EXECUTION ===
     for stage_protocol in protocols_to_run:
         opt_params = opt_params_base.copy()
+        if args.weight_decay is not None:
+            opt_params['weight_decay'] = float(args.weight_decay)
+        elif ARCH == 'v2':
+            opt_params['weight_decay'] = 1e-4
         
         stage_max_epochs = MAX_EPOCHS
         default_min_ep = (10 if ARCH == 'v2' else 50) if stage_protocol == 'warmup' else 20
@@ -479,7 +493,8 @@ def train(infile, outfile, seed):
                     f"min_std={np.sqrt(net_params['min_var']):.4g} ppm, "
                     f"init_std={np.sqrt(net_params['init_var']):.4g} ppm, "
                     f"max_std={np.sqrt(net_params['max_var']):.4g} ppm, "
-                    f"lr={opt_params['lr']}, eval_every={EVAL_EVERY}, plot_every={PLOT_EVERY}, "
+                    f"lr={opt_params['lr']}, wd={opt_params['weight_decay']}, dropout={net_params.get('dropout', 0.0)}, "
+                    f"eval_every={EVAL_EVERY}, plot_every={PLOT_EVERY}, "
                     f"max_d_nu={MAX_D_NU}, min_te_nu={MIN_TE_NU}, min_epochs={stage_min_epochs}) ==="
                 )
                 criterion = nets.BetaNLLLoss(beta=BETA, min_var=net_params['min_var'])
